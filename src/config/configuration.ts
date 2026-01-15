@@ -15,6 +15,12 @@ export default () => ({
     from: process.env.SMTP_FROM,
     secure: process.env.SMTP_SECURE === 'true',
   },
+  ses: {
+    region: process.env.SES_REGION || process.env.AWS_REGION,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    from: process.env.SMTP_FROM,
+  },
   infobip: {
     baseUrl: process.env.INFOBIP_BASE_URL,
     apiKey: process.env.INFOBIP_API_KEY,

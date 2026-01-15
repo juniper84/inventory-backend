@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import nodemailer, { Transporter } from 'nodemailer';
+import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
 type MailPayload = {
   to: string;
@@ -11,39 +11,43 @@ type MailPayload = {
 
 @Injectable()
 export class MailerService {
-  private transporter: Transporter | null = null;
+  private sesClient: SESClient | null = null;
   private fromAddress: string | null = null;
 
   constructor(private readonly configService: ConfigService) {
-    const host = this.configService.get<string>('smtp.host');
-    const port = this.configService.get<number>('smtp.port');
-    const user = this.configService.get<string>('smtp.user');
-    const pass = this.configService.get<string>('smtp.pass');
-    const secure = this.configService.get<boolean>('smtp.secure');
-    const from = this.configService.get<string>('smtp.from');
+    const region = this.configService.get<string>('ses.region');
+    const accessKeyId = this.configService.get<string>('ses.accessKeyId');
+    const secretAccessKey = this.configService.get<string>('ses.secretAccessKey');
+    const from = this.configService.get<string>('ses.from');
 
-    if (host && port && user && pass && from) {
-      this.transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure: Boolean(secure),
-        auth: { user, pass },
+    if (region && accessKeyId && secretAccessKey && from) {
+      this.sesClient = new SESClient({
+        region,
+        credentials: { accessKeyId, secretAccessKey },
       });
       this.fromAddress = from;
     }
   }
 
   async sendEmail(payload: MailPayload) {
-    if (!this.transporter || !this.fromAddress) {
+    if (!this.sesClient || !this.fromAddress) {
       return { skipped: true };
     }
 
-    return this.transporter.sendMail({
-      from: this.fromAddress,
-      to: payload.to,
-      subject: payload.subject,
-      text: payload.text,
-      html: payload.html,
+    const command = new SendEmailCommand({
+      Source: this.fromAddress,
+      Destination: { ToAddresses: [payload.to] },
+      Message: {
+        Subject: { Data: payload.subject, Charset: 'UTF-8' },
+        Body: {
+          Text: { Data: payload.text, Charset: 'UTF-8' },
+          ...(payload.html
+            ? { Html: { Data: payload.html, Charset: 'UTF-8' } }
+            : {}),
+        },
+      },
     });
+
+    return this.sesClient.send(command);
   }
 }
