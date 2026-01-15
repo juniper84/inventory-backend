@@ -1,0 +1,21 @@
+export type AuditEvent = {
+  businessId: string;
+  userId?: string;
+  roleId?: string;
+  branchId?: string;
+  requestId?: string;
+  sessionId?: string;
+  correlationId?: string;
+  action: string;
+  resourceType: string;
+  resourceId?: string;
+  outcome: 'SUCCESS' | 'FAILURE';
+  reason?: string;
+  metadata?: Record<string, unknown>;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  diff?: Record<string, unknown> | null;
+  deviceId?: string;
+  offlineAt?: string;
+  timestamp?: string;
+};

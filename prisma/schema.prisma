@@ -1,0 +1,1618 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Business {
+  id                          String                               @id @default(uuid())
+  name                        String
+  status                      BusinessStatus                       @default(TRIAL)
+  defaultLanguage             String                               @default("en")
+  createdAt                   DateTime                             @default(now())
+  updatedAt                   DateTime                             @updatedAt
+  lastActivityAt              DateTime?
+  reviewReason                String?
+  reviewedAt                  DateTime?
+  underReview                 Boolean                              @default(false)
+  reviewSeverity              String?
+  approvals                   Approval[]
+  approvalPolicies            ApprovalPolicy[]
+  attachments                 Attachment[]
+  auditLogs                   AuditLog[]
+  barcodes                    Barcode[]
+  batches                     Batch[]
+  branches                    Branch[]
+  branchVariantAvailability   BranchVariantAvailability[]
+  settings                    BusinessSettings?
+  businessUsers               BusinessUser[]
+  categories                  Category[]
+  customers                   Customer[]
+  expenses                    Expense[]
+  exportJobs                  ExportJob[]
+  idempotencyKeys             IdempotencyKey[]
+  invitations                 Invitation[]
+  lossEntries                 LossEntry[]
+  notes                       Note[]
+  noteLinks                   NoteLink[]
+  noteReminders               NoteReminder[]
+  notifications               Notification[]
+  offlineActions              OfflineAction[]
+  offlineDevices              OfflineDevice[]
+  platformAnnouncementTargets PlatformAnnouncementBusinessTarget[]
+  priceLists                  PriceList[]
+  products                    Product[]
+  productImages               ProductImage[]
+  purchases                   Purchase[]
+  purchaseOrders              PurchaseOrder[]
+  reorderPoints               ReorderPoint[]
+  roles                       Role[]
+  sales                       Sale[]
+  saleRefunds                 SaleRefund[]
+  saleSettlements             SaleSettlement[]
+  shifts                      Shift[]
+  stockMovements              StockMovement[]
+  stockSnapshots              StockSnapshot[]
+  subscription                Subscription?
+  subscriptionHistory         SubscriptionHistory[]
+  subscriptionRequests        SubscriptionRequest[]
+  suppliers                   Supplier[]
+  supplierReturns             SupplierReturn[]
+  supportAccessRequests       SupportAccessRequest[]
+  supportAccessSessions       SupportAccessSession[]
+  transfers                   Transfer[]
+  units                       Unit[]
+  variants                    Variant[]
+}
+
+model Branch {
+  id                   String                      @id @default(uuid())
+  businessId           String
+  name                 String
+  address              String?
+  phone                String?
+  status               RecordStatus                @default(ACTIVE)
+  isDefault            Boolean                     @default(false)
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
+  priceListId          String?
+  batches              Batch[]
+  business             Business                    @relation(fields: [businessId], references: [id])
+  priceList            PriceList?                  @relation(fields: [priceListId], references: [id])
+  variantAvailability  BranchVariantAvailability[]
+  expenses             Expense[]
+  lossEntries          LossEntry[]
+  notes                Note[]
+  noteReminders        NoteReminder[]
+  notifications        Notification[]
+  purchases            Purchase[]
+  purchaseOrders       PurchaseOrder[]
+  reorderPoints        ReorderPoint[]
+  sales                Sale[]
+  saleRefunds          SaleRefund[]
+  shifts               Shift[]
+  stockMovements       StockMovement[]
+  stockSnapshots       StockSnapshot[]
+  supplierReturns      SupplierReturn[]
+  transferDestinations Transfer[]                  @relation("TransferDestinationBranch")
+  transferSources      Transfer[]                  @relation("TransferSourceBranch")
+  userRoles            UserRole[]
+}
+
+model User {
+  id                            String                   @id @default(uuid())
+  name                          String
+  email                         String                   @unique
+  status                        UserStatus               @default(ACTIVE)
+  createdAt                     DateTime                 @default(now())
+  updatedAt                     DateTime                 @updatedAt
+  lastLoginAt                   DateTime?
+  mustResetPassword             Boolean                  @default(false)
+  passwordHash                  String
+  passwordUpdatedAt             DateTime?
+  emailVerifiedAt               DateTime?
+  lastLoginIp                   String?
+  lastLoginUserAgent            String?
+  lastLoginDeviceId             String?
+  phone                         String?
+  notificationPreferences       Json?
+  approvalsApproved             Approval[]               @relation("ApprovalApprovedBy")
+  approvalsRequested            Approval[]               @relation("ApprovalRequestedBy")
+  memberships                   BusinessUser[]
+  emailVerificationTokens       EmailVerificationToken[]
+  invitations                   Invitation[]             @relation("InvitationCreatedBy")
+  notes                         Note[]                   @relation("NoteAuthor")
+  noteRemindersCreated          NoteReminder[]           @relation("NoteReminderCreatedBy")
+  noteRemindersReceived         NoteReminder[]           @relation("NoteReminderRecipient")
+  notifications                 Notification[]
+  offlineActions                OfflineAction[]
+  offlineDevices                OfflineDevice[]
+  passwordResetTokens           PasswordResetToken[]
+  purchases                     Purchase[]
+  purchaseOrders                PurchaseOrder[]
+  purchasePayments              PurchasePayment[]
+  refreshTokens                 RefreshToken[]
+  sales                         Sale[]
+  saleRefunds                   SaleRefund[]             @relation("SaleRefundCashier")
+  settlements                   SaleSettlement[]
+  closedShifts                  Shift[]                  @relation("ShiftClosedBy")
+  openedShifts                  Shift[]                  @relation("ShiftOpenedBy")
+  stockMovements                StockMovement[]
+  subscriptionRequests          SubscriptionRequest[]
+  approvedSupportAccessRequests SupportAccessRequest[]   @relation("SupportAccessApprovedBy")
+  roles                         UserRole[]
+}
+
+model BusinessUser {
+  id         String     @id @default(uuid())
+  businessId String
+  userId     String
+  status     UserStatus @default(PENDING)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  business   Business   @relation(fields: [businessId], references: [id])
+  user       User       @relation(fields: [userId], references: [id])
+
+  @@unique([businessId, userId])
+  @@index([businessId, status])
+}
+
+model PlatformAdmin {
+  id                    String                 @id @default(uuid())
+  email                 String                 @unique
+  passwordHash          String
+  status                PlatformAdminStatus    @default(ACTIVE)
+  lastLoginAt           DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  subscriptionRequests  SubscriptionRequest[]
+  supportAccessRequests SupportAccessRequest[]
+  supportAccessSessions SupportAccessSession[]
+}
+
+model Unit {
+  id                  String               @id @default(uuid())
+  businessId          String?
+  code                String
+  label               String
+  unitType            UnitType             @default(COUNT)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  purchaseLines       PurchaseLine[]
+  purchaseOrderLines  PurchaseOrderLine[]
+  receivingLines      ReceivingLine[]
+  saleLines           SaleLine[]
+  saleRefundLines     SaleRefundLine[]
+  stockMovements      StockMovement[]
+  supplierReturnLines SupplierReturnLine[]
+  business            Business?            @relation(fields: [businessId], references: [id])
+  baseVariants        Variant[]            @relation("VariantBaseUnit")
+  sellVariants        Variant[]            @relation("VariantSellUnit")
+
+  @@unique([businessId, code])
+  @@index([businessId])
+}
+
+model ReorderPoint {
+  id              String   @id @default(uuid())
+  businessId      String
+  branchId        String
+  variantId       String
+  minQuantity     Decimal  @db.Decimal(12, 2)
+  reorderQuantity Decimal  @db.Decimal(12, 2)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  branch          Branch   @relation(fields: [branchId], references: [id])
+  business        Business @relation(fields: [businessId], references: [id])
+  variant         Variant  @relation(fields: [variantId], references: [id])
+
+  @@unique([businessId, branchId, variantId])
+  @@index([businessId, branchId])
+}
+
+model BusinessSettings {
+  id                    String    @id @default(uuid())
+  businessId            String    @unique
+  approvalDefaults      Json
+  notificationDefaults  Json
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  stockPolicies         Json
+  posPolicies           Json
+  localeSettings        Json
+  readOnlyEnabled       Boolean   @default(false)
+  readOnlyEnabledAt     DateTime?
+  readOnlyReason        String?
+  rateLimitOverride     Json?
+  onboarding            Json?
+  onboardingCompletedAt DateTime?
+  business              Business  @relation(fields: [businessId], references: [id])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model SupportAccessRequest {
+  id               String                 @id @default(uuid())
+  businessId       String
+  platformAdminId  String
+  reason           String
+  status           SupportAccessStatus    @default(PENDING)
+  requestedAt      DateTime               @default(now())
+  decidedAt        DateTime?
+  expiresAt        DateTime?
+  decisionNote     String?
+  approvedByUserId String?
+  scope            Json?
+  durationHours    Int?
+  approvedBy       User?                  @relation("SupportAccessApprovedBy", fields: [approvedByUserId], references: [id])
+  business         Business               @relation(fields: [businessId], references: [id])
+  platformAdmin    PlatformAdmin          @relation(fields: [platformAdminId], references: [id])
+  sessions         SupportAccessSession[]
+
+  @@index([businessId, status])
+}
+
+model SupportAccessSession {
+  id              String               @id @default(uuid())
+  requestId       String
+  businessId      String
+  platformAdminId String
+  tokenHash       String
+  expiresAt       DateTime
+  createdAt       DateTime             @default(now())
+  revokedAt       DateTime?
+  scope           Json?
+  business        Business             @relation(fields: [businessId], references: [id])
+  platformAdmin   PlatformAdmin        @relation(fields: [platformAdminId], references: [id])
+  request         SupportAccessRequest @relation(fields: [requestId], references: [id])
+
+  @@index([businessId])
+}
+
+model ApprovalPolicy {
+  id               String                @id @default(uuid())
+  businessId       String
+  actionType       String
+  thresholdType    ApprovalThresholdType @default(NONE)
+  thresholdValue   Decimal?              @db.Decimal(12, 2)
+  requiredRoleIds  Json?
+  allowSelfApprove Boolean               @default(false)
+  status           RecordStatus          @default(ACTIVE)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  business         Business              @relation(fields: [businessId], references: [id])
+
+  @@index([businessId, actionType])
+}
+
+model Approval {
+  id                String         @id @default(uuid())
+  businessId        String
+  actionType        String
+  status            ApprovalStatus @default(PENDING)
+  requestedByUserId String
+  approvedByUserId  String?
+  requestedAt       DateTime       @default(now())
+  decidedAt         DateTime?
+  amount            Decimal?       @db.Decimal(12, 2)
+  percent           Decimal?       @db.Decimal(5, 2)
+  reason            String?
+  metadata          Json?
+  targetType        String?
+  targetId          String?
+  approvedBy        User?          @relation("ApprovalApprovedBy", fields: [approvedByUserId], references: [id])
+  business          Business       @relation(fields: [businessId], references: [id])
+  requestedBy       User           @relation("ApprovalRequestedBy", fields: [requestedByUserId], references: [id])
+
+  @@index([businessId, status])
+}
+
+model ExportJob {
+  id                         String          @id @default(uuid())
+  businessId                 String
+  type                       ExportJobType
+  status                     ExportJobStatus @default(PENDING)
+  requestedByPlatformAdminId String?
+  requestedByUserId          String?
+  createdAt                  DateTime        @default(now())
+  completedAt                DateTime?
+  metadata                   Json?
+  deliveredAt                DateTime?
+  deliveredByPlatformAdminId String?
+  startedAt                  DateTime?
+  attempts                   Int             @default(0)
+  lastError                  String?
+  branchId                   String?
+  business                   Business        @relation(fields: [businessId], references: [id])
+
+  @@index([businessId, branchId])
+}
+
+model SubscriptionHistory {
+  id                       String              @id @default(uuid())
+  businessId               String
+  previousStatus           SubscriptionStatus?
+  newStatus                SubscriptionStatus?
+  previousTier             SubscriptionTier?
+  newTier                  SubscriptionTier?
+  changedByPlatformAdminId String?
+  reason                   String?
+  metadata                 Json?
+  createdAt                DateTime            @default(now())
+  business                 Business            @relation(fields: [businessId], references: [id])
+
+  @@index([businessId, createdAt])
+}
+
+model ApiMetric {
+  id         String   @id @default(uuid())
+  businessId String?
+  path       String
+  method     String
+  statusCode Int
+  durationMs Int
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([businessId, createdAt])
+}
+
+model PlatformAnnouncement {
+  id                       String                               @id @default(uuid())
+  title                    String
+  message                  String
+  severity                 String
+  startsAt                 DateTime                             @default(now())
+  endsAt                   DateTime?
+  createdByPlatformAdminId String?
+  createdAt                DateTime                             @default(now())
+  businessTargets          PlatformAnnouncementBusinessTarget[]
+  segmentTargets           PlatformAnnouncementSegmentTarget[]
+}
+
+model PlatformAnnouncementBusinessTarget {
+  id             String               @id @default(uuid())
+  announcementId String
+  businessId     String
+  announcement   PlatformAnnouncement @relation(fields: [announcementId], references: [id])
+  business       Business             @relation(fields: [businessId], references: [id])
+
+  @@unique([announcementId, businessId])
+  @@index([businessId])
+}
+
+model PlatformAnnouncementSegmentTarget {
+  id             String                          @id @default(uuid())
+  announcementId String
+  type           PlatformAnnouncementSegmentType
+  value          String
+  announcement   PlatformAnnouncement            @relation(fields: [announcementId], references: [id])
+
+  @@unique([announcementId, type, value])
+  @@index([type, value])
+}
+
+model PlatformAuditLog {
+  id              String   @id @default(uuid())
+  platformAdminId String?
+  action          String
+  resourceType    String
+  resourceId      String?
+  reason          String?
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model Subscription {
+  id                  String             @id @default(uuid())
+  businessId          String             @unique
+  tier                SubscriptionTier
+  status              SubscriptionStatus
+  trialEndsAt         DateTime?
+  graceEndsAt         DateTime?
+  expiresAt           DateTime?
+  limits              Json?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  graceReminderSentAt DateTime?
+  business            Business           @relation(fields: [businessId], references: [id])
+}
+
+model SubscriptionRequest {
+  id                       String                    @id @default(uuid())
+  businessId               String
+  requestedByUserId        String
+  type                     SubscriptionRequestType
+  requestedTier            SubscriptionTier?
+  status                   SubscriptionRequestStatus @default(PENDING)
+  reason                   String?
+  responseNote             String?
+  createdAt                DateTime                  @default(now())
+  decidedAt                DateTime?
+  decidedByPlatformAdminId String?
+  business                 Business                  @relation(fields: [businessId], references: [id])
+  decidedBy                PlatformAdmin?            @relation(fields: [decidedByPlatformAdminId], references: [id])
+  requestedBy              User                      @relation(fields: [requestedByUserId], references: [id])
+
+  @@index([businessId, status])
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  tokenHash  String
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?
+  createdAt  DateTime  @default(now())
+  deviceId   String?
+  user       User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id])
+}
+
+model Invitation {
+  id          String    @id @default(uuid())
+  businessId  String
+  email       String
+  roleId      String
+  tokenHash   String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  createdById String?
+  business    Business  @relation(fields: [businessId], references: [id])
+  createdBy   User?     @relation("InvitationCreatedBy", fields: [createdById], references: [id])
+  role        Role      @relation(fields: [roleId], references: [id])
+
+  @@index([businessId, email])
+}
+
+model Notification {
+  id         String               @id @default(uuid())
+  businessId String
+  userId     String?
+  title      String
+  message    String
+  priority   NotificationPriority
+  status     NotificationStatus   @default(UNREAD)
+  metadata   Json?
+  createdAt  DateTime             @default(now())
+  readAt     DateTime?
+  roleId     String?
+  branchId   String?
+  permission String?
+  archivedAt DateTime?
+  branch     Branch?              @relation(fields: [branchId], references: [id])
+  business   Business             @relation(fields: [businessId], references: [id])
+  role       Role?                @relation(fields: [roleId], references: [id])
+  user       User?                @relation(fields: [userId], references: [id])
+
+  @@index([businessId, status])
+  @@index([businessId, archivedAt])
+  @@index([businessId, roleId])
+  @@index([businessId, branchId])
+  @@index([businessId, permission])
+}
+
+model Note {
+  id         String         @id @default(uuid())
+  businessId String
+  authorId   String
+  branchId   String?
+  title      String
+  body       String
+  status     RecordStatus   @default(ACTIVE)
+  visibility NoteVisibility @default(BUSINESS)
+  tags       String[]       @default([])
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  author     User           @relation("NoteAuthor", fields: [authorId], references: [id])
+  branch     Branch?        @relation(fields: [branchId], references: [id])
+  business   Business       @relation(fields: [businessId], references: [id])
+  links      NoteLink[]
+  reminders  NoteReminder[]
+
+  @@index([businessId, status, createdAt])
+  @@index([businessId, branchId])
+}
+
+model NoteLink {
+  id           String   @id @default(uuid())
+  noteId       String
+  businessId   String
+  resourceType String
+  resourceId   String
+  resourceName String?
+  createdAt    DateTime @default(now())
+  business     Business @relation(fields: [businessId], references: [id])
+  note         Note     @relation(fields: [noteId], references: [id])
+
+  @@unique([noteId, resourceType, resourceId])
+  @@index([businessId, resourceType, resourceId])
+}
+
+model NoteReminder {
+  id            String              @id @default(uuid())
+  noteId        String
+  businessId    String
+  createdById   String
+  recipientId   String?
+  branchId      String?
+  scheduledAt   DateTime
+  channel       NoteReminderChannel
+  status        NoteReminderStatus  @default(SCHEDULED)
+  sentAt        DateTime?
+  lastAttemptAt DateTime?
+  attemptCount  Int                 @default(0)
+  lastError     String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  branch        Branch?             @relation(fields: [branchId], references: [id])
+  business      Business            @relation(fields: [businessId], references: [id])
+  createdBy     User                @relation("NoteReminderCreatedBy", fields: [createdById], references: [id])
+  note          Note                @relation(fields: [noteId], references: [id])
+  recipient     User?               @relation("NoteReminderRecipient", fields: [recipientId], references: [id])
+
+  @@index([businessId, status, scheduledAt])
+  @@index([businessId, channel, scheduledAt])
+}
+
+model AuditLog {
+  id            String    @id @default(uuid())
+  businessId    String
+  userId        String?
+  roleId        String?
+  branchId      String?
+  action        String
+  resourceType  String
+  resourceId    String?
+  outcome       String
+  reason        String?
+  metadata      Json?
+  before        Json?
+  after         Json?
+  deviceId      String?
+  offlineAt     DateTime?
+  createdAt     DateTime  @default(now())
+  correlationId String?
+  diff          Json?
+  hash          String?
+  previousHash  String?
+  requestId     String?
+  sessionId     String?
+  business      Business  @relation(fields: [businessId], references: [id])
+
+  @@index([businessId, createdAt])
+  @@index([businessId, requestId])
+  @@index([businessId, correlationId])
+}
+
+model IdempotencyKey {
+  id           String   @id @default(uuid())
+  businessId   String
+  scope        String
+  key          String
+  resourceType String?
+  resourceId   String?
+  metadata     Json?
+  createdAt    DateTime @default(now())
+  business     Business @relation(fields: [businessId], references: [id])
+
+  @@unique([businessId, scope, key])
+  @@index([businessId, scope, createdAt])
+}
+
+model Role {
+  id              String           @id @default(uuid())
+  businessId      String
+  name            String
+  isSystem        Boolean          @default(false)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  invitations     Invitation[]
+  notifications   Notification[]
+  business        Business         @relation(fields: [businessId], references: [id])
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+}
+
+model Permission {
+  id              String           @id @default(uuid())
+  code            String           @unique
+  description     String?
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  id           String     @id @default(uuid())
+  roleId       String
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id])
+  role         Role       @relation(fields: [roleId], references: [id])
+
+  @@unique([roleId, permissionId])
+}
+
+model Customer {
+  id          String       @id @default(uuid())
+  businessId  String
+  name        String
+  phone       String?
+  email       String?
+  tin         String?
+  notes       String?
+  status      RecordStatus @default(ACTIVE)
+  priceListId String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  business    Business     @relation(fields: [businessId], references: [id])
+  priceList   PriceList?   @relation(fields: [priceListId], references: [id])
+  sales       Sale[]
+  refunds     SaleRefund[]
+
+  @@unique([businessId, phone])
+  @@unique([businessId, email])
+  @@index([businessId, status])
+  @@index([businessId, phone])
+  @@index([businessId, email])
+}
+
+model PriceList {
+  id         String          @id @default(uuid())
+  businessId String
+  name       String
+  status     RecordStatus    @default(ACTIVE)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+  branches   Branch[]
+  customers  Customer[]
+  business   Business        @relation(fields: [businessId], references: [id])
+  items      PriceListItem[]
+
+  @@unique([businessId, name])
+}
+
+model PriceListItem {
+  id          String    @id @default(uuid())
+  priceListId String
+  variantId   String
+  price       Decimal   @db.Decimal(12, 2)
+  createdAt   DateTime  @default(now())
+  priceList   PriceList @relation(fields: [priceListId], references: [id])
+  variant     Variant   @relation(fields: [variantId], references: [id])
+
+  @@unique([priceListId, variantId])
+}
+
+model Shift {
+  id             String      @id @default(uuid())
+  businessId     String
+  branchId       String
+  openedById     String
+  openedAt       DateTime    @default(now())
+  openingCash    Decimal     @db.Decimal(12, 2)
+  status         ShiftStatus @default(OPEN)
+  closedById     String?
+  closedAt       DateTime?
+  closingCash    Decimal?    @db.Decimal(12, 2)
+  variance       Decimal?    @db.Decimal(12, 2)
+  varianceReason String?
+  notes          String?
+  sales          Sale[]
+  branch         Branch      @relation(fields: [branchId], references: [id])
+  business       Business    @relation(fields: [businessId], references: [id])
+  closedBy       User?       @relation("ShiftClosedBy", fields: [closedById], references: [id])
+  openedBy       User        @relation("ShiftOpenedBy", fields: [openedById], references: [id])
+
+  @@index([businessId, branchId, status])
+}
+
+model UserRole {
+  id       String  @id @default(uuid())
+  userId   String
+  roleId   String
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id])
+  role     Role    @relation(fields: [roleId], references: [id])
+  user     User    @relation(fields: [userId], references: [id])
+
+  @@unique([userId, roleId, branchId])
+}
+
+model Category {
+  id         String       @id @default(uuid())
+  businessId String
+  name       String
+  status     RecordStatus @default(ACTIVE)
+  parentId   String?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  business   Business     @relation(fields: [businessId], references: [id])
+  parent     Category?    @relation("CategoryParent", fields: [parentId], references: [id])
+  children   Category[]   @relation("CategoryParent")
+  products   Product[]
+}
+
+model Product {
+  id          String         @id @default(uuid())
+  businessId  String
+  name        String
+  description String?
+  status      RecordStatus   @default(ACTIVE)
+  categoryId  String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  business    Business       @relation(fields: [businessId], references: [id])
+  category    Category?      @relation(fields: [categoryId], references: [id])
+  images      ProductImage[]
+  variants    Variant[]
+}
+
+model Variant {
+  id                  String                      @id @default(uuid())
+  businessId          String
+  productId           String
+  name                String
+  sku                 String?
+  defaultPrice        Decimal?                    @db.Decimal(12, 2)
+  defaultCost         Decimal?                    @db.Decimal(12, 2)
+  vatMode             VatMode                     @default(INCLUSIVE)
+  status              RecordStatus                @default(ACTIVE)
+  createdAt           DateTime                    @default(now())
+  updatedAt           DateTime                    @updatedAt
+  trackStock          Boolean                     @default(true)
+  imageUrl            String?
+  minPrice            Decimal?                    @db.Decimal(12, 2)
+  baseUnitId          String?
+  sellUnitId          String?
+  conversionFactor    Decimal?                    @default(1) @db.Decimal(12, 4)
+  barcodes            Barcode[]
+  batches             Batch[]
+  availability        BranchVariantAvailability[]
+  lossEntries         LossEntry[]
+  priceListItems      PriceListItem[]
+  purchaseLines       PurchaseLine[]
+  purchaseOrderLines  PurchaseOrderLine[]
+  receivingLines      ReceivingLine[]
+  reorderPoints       ReorderPoint[]
+  saleLines           SaleLine[]
+  refundLines         SaleRefundLine[]
+  stockMovements      StockMovement[]
+  stockSnapshots      StockSnapshot[]
+  supplierReturnLines SupplierReturnLine[]
+  transferItems       TransferItem[]
+  baseUnit            Unit?                       @relation("VariantBaseUnit", fields: [baseUnitId], references: [id])
+  business            Business                    @relation(fields: [businessId], references: [id])
+  product             Product                     @relation(fields: [productId], references: [id])
+  sellUnit            Unit?                       @relation("VariantSellUnit", fields: [sellUnitId], references: [id])
+
+  @@unique([businessId, sku])
+  @@index([businessId, status])
+  @@index([baseUnitId])
+  @@index([sellUnitId])
+}
+
+model Barcode {
+  id         String   @id @default(uuid())
+  businessId String
+  variantId  String
+  code       String
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  business   Business @relation(fields: [businessId], references: [id])
+  variant    Variant  @relation(fields: [variantId], references: [id])
+
+  @@unique([businessId, code])
+}
+
+model ProductImage {
+  id         String           @id @default(uuid())
+  businessId String
+  productId  String
+  url        String
+  filename   String
+  mimeType   String?
+  sizeMb     Decimal?         @db.Decimal(12, 2)
+  isPrimary  Boolean          @default(false)
+  status     AttachmentStatus @default(ACTIVE)
+  createdAt  DateTime         @default(now())
+  business   Business         @relation(fields: [businessId], references: [id])
+  product    Product          @relation(fields: [productId], references: [id])
+
+  @@index([businessId, productId])
+}
+
+model BranchVariantAvailability {
+  id         String   @id @default(uuid())
+  businessId String
+  branchId   String
+  variantId  String
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  branch     Branch   @relation(fields: [branchId], references: [id])
+  business   Business @relation(fields: [businessId], references: [id])
+  variant    Variant  @relation(fields: [variantId], references: [id])
+
+  @@unique([businessId, branchId, variantId])
+  @@index([businessId])
+}
+
+model Batch {
+  id             String           @id @default(uuid())
+  businessId     String
+  branchId       String
+  variantId      String
+  code           String
+  expiryDate     DateTime?
+  receivedAt     DateTime         @default(now())
+  createdAt      DateTime         @default(now())
+  unitCost       Decimal?         @db.Decimal(12, 2)
+  branch         Branch           @relation(fields: [branchId], references: [id])
+  business       Business         @relation(fields: [businessId], references: [id])
+  variant        Variant          @relation(fields: [variantId], references: [id])
+  receivingLines ReceivingLine[]
+  saleLines      SaleLine[]
+  refundLines    SaleRefundLine[]
+  movements      StockMovement[]
+  transferItems  TransferItem[]
+
+  @@unique([businessId, branchId, variantId, code])
+  @@index([businessId, variantId, expiryDate])
+}
+
+model StockMovement {
+  id           String            @id @default(uuid())
+  businessId   String
+  branchId     String
+  variantId    String
+  batchId      String?
+  quantity     Decimal           @db.Decimal(12, 2)
+  movementType StockMovementType
+  reason       String?
+  createdAt    DateTime          @default(now())
+  unitId       String?
+  unitQuantity Decimal?          @db.Decimal(12, 2)
+  createdById  String?
+  lossEntries  LossEntry[]
+  batch        Batch?            @relation(fields: [batchId], references: [id])
+  branch       Branch            @relation(fields: [branchId], references: [id])
+  business     Business          @relation(fields: [businessId], references: [id])
+  createdBy    User?             @relation(fields: [createdById], references: [id])
+  unit         Unit?             @relation(fields: [unitId], references: [id])
+  variant      Variant           @relation(fields: [variantId], references: [id])
+}
+
+model StockSnapshot {
+  id                String   @id @default(uuid())
+  businessId        String
+  branchId          String
+  variantId         String
+  quantity          Decimal  @db.Decimal(12, 2)
+  updatedAt         DateTime @updatedAt
+  inTransitQuantity Decimal  @default(0) @db.Decimal(12, 2)
+  branch            Branch   @relation(fields: [branchId], references: [id])
+  business          Business @relation(fields: [businessId], references: [id])
+  variant           Variant  @relation(fields: [variantId], references: [id])
+
+  @@unique([businessId, branchId, variantId])
+}
+
+model Transfer {
+  id                  String         @id @default(uuid())
+  businessId          String
+  sourceBranchId      String
+  destinationBranchId String
+  status              TransferStatus @default(REQUESTED)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  feeAmount           Decimal?       @db.Decimal(12, 2)
+  feeCarrier          String?
+  feeCurrency         String?
+  feeNote             String?
+  expenses            Expense[]
+  business            Business       @relation(fields: [businessId], references: [id])
+  destinationBranch   Branch         @relation("TransferDestinationBranch", fields: [destinationBranchId], references: [id])
+  sourceBranch        Branch         @relation("TransferSourceBranch", fields: [sourceBranchId], references: [id])
+  items               TransferItem[]
+}
+
+model TransferItem {
+  id               String   @id @default(uuid())
+  transferId       String
+  variantId        String
+  quantity         Decimal  @db.Decimal(12, 2)
+  batchId          String?
+  receivedQuantity Decimal  @default(0) @db.Decimal(12, 2)
+  batch            Batch?   @relation(fields: [batchId], references: [id])
+  transfer         Transfer @relation(fields: [transferId], references: [id])
+  variant          Variant  @relation(fields: [variantId], references: [id])
+}
+
+model LossEntry {
+  id              String        @id @default(uuid())
+  businessId      String
+  branchId        String
+  variantId       String
+  stockMovementId String
+  quantity        Decimal       @db.Decimal(12, 2)
+  unitCost        Decimal       @db.Decimal(12, 2)
+  totalCost       Decimal       @db.Decimal(12, 2)
+  reason          LossReason
+  note            String?
+  createdAt       DateTime      @default(now())
+  branch          Branch        @relation(fields: [branchId], references: [id])
+  business        Business      @relation(fields: [businessId], references: [id])
+  stockMovement   StockMovement @relation(fields: [stockMovementId], references: [id])
+  variant         Variant       @relation(fields: [variantId], references: [id])
+
+  @@index([businessId, branchId, createdAt])
+  @@index([businessId, variantId, createdAt])
+}
+
+model Expense {
+  id          String          @id @default(uuid())
+  businessId  String
+  branchId    String
+  category    ExpenseCategory @default(GENERAL)
+  amount      Decimal         @db.Decimal(12, 2)
+  currency    String
+  expenseDate DateTime        @default(now())
+  note        String?
+  receiptRef  String?
+  transferId  String?
+  createdBy   String?
+  createdAt   DateTime        @default(now())
+  branch      Branch          @relation(fields: [branchId], references: [id])
+  business    Business        @relation(fields: [businessId], references: [id])
+  transfer    Transfer?       @relation(fields: [transferId], references: [id])
+
+  @@index([businessId, branchId, createdAt])
+  @@index([businessId, category, createdAt])
+}
+
+model Sale {
+  id                    String           @id @default(uuid())
+  businessId            String
+  branchId              String
+  cashierId             String?
+  status                SaleStatus       @default(DRAFT)
+  subtotal              Decimal          @db.Decimal(12, 2)
+  discountTotal         Decimal          @db.Decimal(12, 2)
+  vatTotal              Decimal          @db.Decimal(12, 2)
+  total                 Decimal          @db.Decimal(12, 2)
+  createdAt             DateTime         @default(now())
+  completedAt           DateTime?
+  isOffline             Boolean          @default(false)
+  offlineDeviceId       String?
+  provisional           Boolean          @default(false)
+  cartDiscount          Decimal          @db.Decimal(12, 2)
+  completionKey         String?
+  customerId            String?
+  shiftId               String?
+  saleType              SaleType         @default(SALE)
+  paidAmount            Decimal          @default(0) @db.Decimal(12, 2)
+  outstandingAmount     Decimal          @default(0) @db.Decimal(12, 2)
+  creditDueDate         DateTime?
+  customerNameSnapshot  String?
+  customerPhoneSnapshot String?
+  customerEmailSnapshot String?
+  customerTinSnapshot   String?
+  receipt               Receipt?
+  branch                Branch           @relation(fields: [branchId], references: [id])
+  business              Business         @relation(fields: [businessId], references: [id])
+  cashier               User?            @relation(fields: [cashierId], references: [id])
+  customer              Customer?        @relation(fields: [customerId], references: [id])
+  shift                 Shift?           @relation(fields: [shiftId], references: [id])
+  lines                 SaleLine[]
+  payments              SalePayment[]
+  refunds               SaleRefund[]
+  settlements           SaleSettlement[]
+
+  @@unique([businessId, completionKey])
+  @@index([businessId, createdAt])
+  @@index([businessId, status, branchId])
+}
+
+model SaleLine {
+  id              String   @id @default(uuid())
+  saleId          String
+  variantId       String
+  quantity        Decimal  @db.Decimal(12, 2)
+  unitPrice       Decimal  @db.Decimal(12, 2)
+  vatMode         VatMode
+  vatRate         Decimal  @db.Decimal(5, 2)
+  vatAmount       Decimal  @db.Decimal(12, 2)
+  lineTotal       Decimal  @db.Decimal(12, 2)
+  lineDiscount    Decimal  @db.Decimal(12, 2)
+  batchId         String?
+  productName     String
+  variantName     String
+  skuSnapshot     String?
+  barcodeSnapshot String?
+  unitId          String?
+  unitFactor      Decimal? @default(1) @db.Decimal(12, 4)
+  unitCost        Decimal? @db.Decimal(12, 2)
+  batch           Batch?   @relation(fields: [batchId], references: [id])
+  sale            Sale     @relation(fields: [saleId], references: [id])
+  unit            Unit?    @relation(fields: [unitId], references: [id])
+  variant         Variant  @relation(fields: [variantId], references: [id])
+}
+
+model SalePayment {
+  id          String        @id @default(uuid())
+  saleId      String
+  method      PaymentMethod
+  amount      Decimal       @db.Decimal(12, 2)
+  reference   String?
+  methodLabel String?
+  sale        Sale          @relation(fields: [saleId], references: [id])
+}
+
+model Receipt {
+  id            String   @id @default(uuid())
+  saleId        String   @unique
+  receiptNumber String   @unique
+  issuedAt      DateTime @default(now())
+  data          Json?
+  sale          Sale     @relation(fields: [saleId], references: [id])
+}
+
+model SaleRefund {
+  id                    String           @id @default(uuid())
+  saleId                String?
+  businessId            String
+  branchId              String
+  cashierId             String?
+  status                RefundStatus     @default(PENDING)
+  reason                String?
+  returnToStock         Boolean          @default(true)
+  total                 Decimal          @db.Decimal(12, 2)
+  createdAt             DateTime         @default(now())
+  customerId            String?
+  isReturnOnly          Boolean          @default(false)
+  customerNameSnapshot  String?
+  customerPhoneSnapshot String?
+  customerTinSnapshot   String?
+  branch                Branch           @relation(fields: [branchId], references: [id])
+  business              Business         @relation(fields: [businessId], references: [id])
+  cashier               User?            @relation("SaleRefundCashier", fields: [cashierId], references: [id])
+  customer              Customer?        @relation(fields: [customerId], references: [id])
+  sale                  Sale?            @relation(fields: [saleId], references: [id])
+  lines                 SaleRefundLine[]
+}
+
+model SaleRefundLine {
+  id         String     @id @default(uuid())
+  refundId   String
+  variantId  String
+  batchId    String?
+  quantity   Decimal    @db.Decimal(12, 2)
+  unitPrice  Decimal    @db.Decimal(12, 2)
+  vatAmount  Decimal    @db.Decimal(12, 2)
+  lineTotal  Decimal    @db.Decimal(12, 2)
+  unitId     String?
+  unitFactor Decimal?   @default(1) @db.Decimal(12, 4)
+  batch      Batch?     @relation(fields: [batchId], references: [id])
+  refund     SaleRefund @relation(fields: [refundId], references: [id])
+  unit       Unit?      @relation(fields: [unitId], references: [id])
+  variant    Variant    @relation(fields: [variantId], references: [id])
+}
+
+model SaleSettlement {
+  id           String        @id @default(uuid())
+  saleId       String
+  businessId   String
+  amount       Decimal       @db.Decimal(12, 2)
+  method       PaymentMethod
+  methodLabel  String?
+  reference    String?
+  receivedById String
+  receivedAt   DateTime      @default(now())
+  business     Business      @relation(fields: [businessId], references: [id])
+  receivedBy   User          @relation(fields: [receivedById], references: [id])
+  sale         Sale          @relation(fields: [saleId], references: [id])
+
+  @@index([businessId, saleId])
+}
+
+model OfflineDevice {
+  id                  String              @id @default(uuid())
+  businessId          String
+  userId              String
+  deviceName          String
+  deviceKey           String
+  createdAt           DateTime            @default(now())
+  lastSeenAt          DateTime?
+  permissionsSnapshot Json?
+  revokedAt           DateTime?
+  status              OfflineDeviceStatus @default(ACTIVE)
+  actions             OfflineAction[]
+  business            Business            @relation(fields: [businessId], references: [id])
+  user                User                @relation(fields: [userId], references: [id])
+
+  @@index([businessId, status])
+}
+
+model OfflineAction {
+  id              String              @id @default(uuid())
+  businessId      String
+  userId          String
+  deviceId        String
+  actionType      String
+  payload         Json
+  status          OfflineActionStatus @default(PENDING)
+  createdAt       DateTime            @default(now())
+  syncedAt        DateTime?
+  appliedAt       DateTime?
+  checksum        String
+  conflictPayload Json?
+  conflictReason  String?
+  errorMessage    String?
+  localAuditId    String?
+  provisionalAt   DateTime?
+  business        Business            @relation(fields: [businessId], references: [id])
+  device          OfflineDevice       @relation(fields: [deviceId], references: [id])
+  user            User                @relation(fields: [userId], references: [id])
+
+  @@unique([businessId, deviceId, checksum])
+  @@index([businessId, status])
+}
+
+model Supplier {
+  id              String           @id @default(uuid())
+  businessId      String
+  name            String
+  phone           String?
+  email           String?
+  address         String?
+  notes           String?
+  status          RecordStatus     @default(ACTIVE)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  leadTimeDays    Int?
+  purchases       Purchase[]
+  purchaseOrders  PurchaseOrder[]
+  business        Business         @relation(fields: [businessId], references: [id])
+  supplierReturns SupplierReturn[]
+}
+
+model Purchase {
+  id              String            @id @default(uuid())
+  businessId      String
+  branchId        String
+  supplierId      String
+  status          PurchaseStatus    @default(DRAFT)
+  total           Decimal           @db.Decimal(12, 2)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  createdById     String?
+  attachments     Attachment[]
+  branch          Branch            @relation(fields: [branchId], references: [id])
+  business        Business          @relation(fields: [businessId], references: [id])
+  createdBy       User?             @relation(fields: [createdById], references: [id])
+  supplier        Supplier          @relation(fields: [supplierId], references: [id])
+  lines           PurchaseLine[]
+  payments        PurchasePayment[]
+  receivings      ReceivingLine[]
+  supplierReturns SupplierReturn[]
+}
+
+model PurchaseLine {
+  id         String   @id @default(uuid())
+  purchaseId String
+  variantId  String
+  quantity   Decimal  @db.Decimal(12, 2)
+  unitCost   Decimal  @db.Decimal(12, 2)
+  unitId     String?
+  unitFactor Decimal? @default(1) @db.Decimal(12, 4)
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+  unit       Unit?    @relation(fields: [unitId], references: [id])
+  variant    Variant  @relation(fields: [variantId], references: [id])
+}
+
+model PurchaseOrder {
+  id              String              @id @default(uuid())
+  businessId      String
+  branchId        String
+  supplierId      String
+  status          PurchaseStatus      @default(DRAFT)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  createdById     String?
+  expectedAt      DateTime?
+  attachments     Attachment[]
+  branch          Branch              @relation(fields: [branchId], references: [id])
+  business        Business            @relation(fields: [businessId], references: [id])
+  createdBy       User?               @relation(fields: [createdById], references: [id])
+  supplier        Supplier            @relation(fields: [supplierId], references: [id])
+  lines           PurchaseOrderLine[]
+  receivings      ReceivingLine[]
+  supplierReturns SupplierReturn[]
+}
+
+model PurchaseOrderLine {
+  id              String        @id @default(uuid())
+  purchaseOrderId String
+  variantId       String
+  quantity        Decimal       @db.Decimal(12, 2)
+  unitCost        Decimal       @db.Decimal(12, 2)
+  unitId          String?
+  unitFactor      Decimal?      @default(1) @db.Decimal(12, 4)
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  unit            Unit?         @relation(fields: [unitId], references: [id])
+  variant         Variant       @relation(fields: [variantId], references: [id])
+}
+
+model ReceivingLine {
+  id                  String               @id @default(uuid())
+  purchaseId          String?
+  purchaseOrderId     String?
+  variantId           String
+  quantity            Decimal              @db.Decimal(12, 2)
+  unitCost            Decimal              @db.Decimal(12, 2)
+  receivedAt          DateTime             @default(now())
+  overrideReason      String?
+  unitId              String?
+  unitFactor          Decimal?             @default(1) @db.Decimal(12, 4)
+  batchId             String?
+  batch               Batch?               @relation(fields: [batchId], references: [id])
+  purchase            Purchase?            @relation(fields: [purchaseId], references: [id])
+  purchaseOrder       PurchaseOrder?       @relation(fields: [purchaseOrderId], references: [id])
+  unit                Unit?                @relation(fields: [unitId], references: [id])
+  variant             Variant              @relation(fields: [variantId], references: [id])
+  supplierReturnLines SupplierReturnLine[]
+}
+
+model Attachment {
+  id              String           @id @default(uuid())
+  businessId      String
+  purchaseId      String?
+  purchaseOrderId String?
+  filename        String
+  url             String
+  status          AttachmentStatus @default(ACTIVE)
+  createdAt       DateTime         @default(now())
+  sizeMb          Decimal?         @db.Decimal(12, 2)
+  archivedAt      DateTime?
+  mimeType        String?
+  version         Int              @default(1)
+  storageKey      String?
+  business        Business         @relation(fields: [businessId], references: [id])
+  purchase        Purchase?        @relation(fields: [purchaseId], references: [id])
+  purchaseOrder   PurchaseOrder?   @relation(fields: [purchaseOrderId], references: [id])
+}
+
+model PurchasePayment {
+  id           String        @id @default(uuid())
+  businessId   String
+  purchaseId   String
+  method       PaymentMethod
+  amount       Decimal       @db.Decimal(12, 2)
+  reference    String?
+  methodLabel  String?
+  paidAt       DateTime      @default(now())
+  receivedById String?
+  purchase     Purchase      @relation(fields: [purchaseId], references: [id])
+  receivedBy   User?         @relation(fields: [receivedById], references: [id])
+
+  @@index([businessId, purchaseId])
+}
+
+model SupplierReturn {
+  id              String               @id @default(uuid())
+  businessId      String
+  branchId        String
+  supplierId      String
+  purchaseId      String?
+  purchaseOrderId String?
+  status          SupplierReturnStatus @default(PENDING)
+  reason          String?
+  createdAt       DateTime             @default(now())
+  branch          Branch               @relation(fields: [branchId], references: [id])
+  business        Business             @relation(fields: [businessId], references: [id])
+  purchase        Purchase?            @relation(fields: [purchaseId], references: [id])
+  purchaseOrder   PurchaseOrder?       @relation(fields: [purchaseOrderId], references: [id])
+  supplier        Supplier             @relation(fields: [supplierId], references: [id])
+  lines           SupplierReturnLine[]
+}
+
+model SupplierReturnLine {
+  id               String         @id @default(uuid())
+  supplierReturnId String
+  variantId        String
+  quantity         Decimal        @db.Decimal(12, 2)
+  unitCost         Decimal        @db.Decimal(12, 2)
+  receivingLineId  String?
+  unitId           String?
+  unitFactor       Decimal?       @default(1) @db.Decimal(12, 4)
+  receivingLine    ReceivingLine? @relation(fields: [receivingLineId], references: [id])
+  supplierReturn   SupplierReturn @relation(fields: [supplierReturnId], references: [id])
+  unit             Unit?          @relation(fields: [unitId], references: [id])
+  variant          Variant        @relation(fields: [variantId], references: [id])
+}
+
+enum BusinessStatus {
+  TRIAL
+  ACTIVE
+  GRACE
+  EXPIRED
+  SUSPENDED
+  DELETED
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+  PENDING
+}
+
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum VatMode {
+  INCLUSIVE
+  EXCLUSIVE
+  EXEMPT
+}
+
+enum StockMovementType {
+  OPENING_BALANCE
+  PURCHASE_IN
+  SALE_OUT
+  ADJUSTMENT_POSITIVE
+  ADJUSTMENT_NEGATIVE
+  TRANSFER_OUT
+  TRANSFER_IN
+  RETURN_IN
+  RETURN_OUT
+  STOCK_COUNT_VARIANCE
+}
+
+enum InventoryValuationMethod {
+  FIFO
+  LIFO
+  AVERAGE
+}
+
+enum TransferStatus {
+  REQUESTED
+  APPROVED
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+enum SaleStatus {
+  DRAFT
+  COMPLETED
+  VOIDED
+  REFUNDED
+}
+
+enum SaleType {
+  SALE
+  RETURN_ONLY
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  MOBILE_MONEY
+  BANK_TRANSFER
+  OTHER
+}
+
+enum RefundStatus {
+  PENDING
+  COMPLETED
+  REJECTED
+}
+
+enum PurchaseStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  PARTIALLY_RECEIVED
+  FULLY_RECEIVED
+  CLOSED
+  CANCELLED
+}
+
+enum AttachmentStatus {
+  ACTIVE
+  REMOVED
+  ARCHIVED
+}
+
+enum SupplierReturnStatus {
+  PENDING
+  COMPLETED
+  REJECTED
+}
+
+enum OfflineActionStatus {
+  PENDING
+  APPLIED
+  REJECTED
+  CONFLICT
+  FAILED
+}
+
+enum OfflineDeviceStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  GRACE
+  EXPIRED
+  SUSPENDED
+}
+
+enum SubscriptionRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum SubscriptionRequestType {
+  UPGRADE
+  DOWNGRADE
+  CANCEL
+}
+
+enum SubscriptionTier {
+  STARTER
+  BUSINESS
+  ENTERPRISE
+}
+
+enum NoteVisibility {
+  PRIVATE
+  BRANCH
+  BUSINESS
+}
+
+enum NoteReminderChannel {
+  IN_APP
+  EMAIL
+  WHATSAPP
+}
+
+enum NoteReminderStatus {
+  SCHEDULED
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum NotificationPriority {
+  ACTION_REQUIRED
+  WARNING
+  INFO
+  SECURITY
+}
+
+enum NotificationStatus {
+  UNREAD
+  READ
+  ACKNOWLEDGED
+}
+
+enum PlatformAdminStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum SupportAccessStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum ExportJobType {
+  EXPORT_ON_EXIT
+  STOCK
+  PRODUCTS
+  OPENING_STOCK
+  PRICE_UPDATES
+  SUPPLIERS
+  BRANCHES
+  USERS
+  AUDIT_LOGS
+  CUSTOMER_REPORTS
+}
+
+enum ExportJobStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  RUNNING
+}
+
+enum UnitType {
+  COUNT
+  WEIGHT
+  VOLUME
+  LENGTH
+  OTHER
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum ApprovalThresholdType {
+  NONE
+  PERCENT
+  AMOUNT
+}
+
+enum LossReason {
+  DAMAGED
+  LOST
+  STOLEN
+  EXPIRED
+  SHRINKAGE
+  OTHER
+}
+
+enum ExpenseCategory {
+  GENERAL
+  TRANSFER_FEE
+  SHIPPING
+  UTILITIES
+  RENT
+  PAYROLL
+  OTHER
+}
+
+enum PlatformAnnouncementSegmentType {
+  TIER
+  STATUS
+}

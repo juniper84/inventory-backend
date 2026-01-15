@@ -1,0 +1,39 @@
+{
+  "email": {
+    "common": {
+      "brandName": "New Vision Inventory",
+      "supportLine": "Unahitaji msaada? Jibu barua hii au wasiliana na msimamizi wako.",
+      "securityLine": "Kama hukuomba hili, unaweza kupuuza barua hii.",
+      "footerLine": "© {year} New Vision Inventory. Haki zote zimehifadhiwa.",
+      "notificationCta": "Fungua New Vision Inventory"
+    },
+    "passwordReset": {
+      "subject": "Weka upya nenosiri lako la New Vision Inventory",
+      "title": "Weka upya nenosiri",
+      "body": "Tumia tokeni hapa chini kuweka upya nenosiri lako la New Vision Inventory. Tokeni hii inaisha baada ya saa 2.\nTokeni: {token}\nKitambulisho cha mtumiaji: {userId}",
+      "cta": "Weka upya nenosiri"
+    },
+    "verifyEmail": {
+      "subject": "Thibitisha barua pepe yako ya New Vision Inventory",
+      "title": "Thibitisha barua pepe yako",
+      "body": "Tumia tokeni hapa chini kuthibitisha barua pepe yako. Tokeni hii inaisha baada ya saa 24.\nTokeni: {token}",
+      "cta": "Thibitisha barua pepe"
+    },
+    "invite": {
+      "subject": "Umealikwa kwenye New Vision Inventory",
+      "title": "Umealikwa",
+      "body": "Jiunge na timu yako katika New Vision Inventory kwa kutumia kiungo hapa chini.\nKiungo cha mwaliko: {url}\nTokeni ya mwaliko: {token}",
+      "cta": "Kubali mwaliko"
+    }
+  },
+  "sms": {
+    "passwordReset": "Weka upya nenosiri kwa tokeni hii: {token}",
+    "verifyEmail": "Thibitisha barua pepe yako kwa tokeni hii: {token}",
+    "invite": "Jiunge na New Vision Inventory: {url}\nTokeni ya mwaliko: {token}"
+  },
+  "whatsapp": {
+    "passwordReset": "Weka upya nenosiri kwa tokeni hii: {token}",
+    "verifyEmail": "Thibitisha barua pepe yako kwa tokeni hii: {token}",
+    "invite": "Jiunge na New Vision Inventory: {url}\nTokeni ya mwaliko: {token}"
+  }
+}
