@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
@@ -11,6 +11,7 @@ type MailPayload = {
 
 @Injectable()
 export class MailerService {
+  private readonly logger = new Logger(MailerService.name);
   private sesClient: SESClient | null = null;
   private fromAddress: string | null = null;
 
@@ -19,6 +20,10 @@ export class MailerService {
     const accessKeyId = this.configService.get<string>('ses.accessKeyId');
     const secretAccessKey = this.configService.get<string>('ses.secretAccessKey');
     const from = this.configService.get<string>('ses.from');
+
+    this.logger.log(
+      `Mailer config: region=${region ?? 'unset'} from=${from ?? 'unset'}`,
+    );
 
     if (region && accessKeyId && secretAccessKey && from) {
       this.sesClient = new SESClient({
