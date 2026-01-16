@@ -39,6 +39,10 @@ export class MailerService {
       return { skipped: true };
     }
 
+    this.logger.log(
+      `Sending email: from=${this.fromAddress} to=${payload.to}`,
+    );
+
     const command = new SendEmailCommand({
       Source: this.fromAddress,
       Destination: { ToAddresses: [payload.to] },
