@@ -1,10 +1,15 @@
 import {
   ForbiddenException,
   Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Notification } from '@prisma/client';
+import { createClient, RedisClientType } from 'redis';
 import { Observable, Subject, interval, merge } from 'rxjs';
 import { filter, map, startWith } from 'rxjs/operators';
 import { JwtPayload } from '../auth/auth.types';
@@ -21,23 +26,83 @@ type StreamContext = {
 
 type StreamEvent = {
   data: unknown;
-  event?: string;
+  type?: string;
   id?: string;
   retry?: number;
 };
 
 @Injectable()
-export class NotificationStreamService {
+export class NotificationStreamService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(NotificationStreamService.name);
   private readonly notificationSubject = new Subject<Notification>();
   private readonly announcementSubject = new Subject<unknown>();
+  private readonly channel = 'nvi:notifications';
+  private redisPublisher?: RedisClientType;
+  private redisSubscriber?: RedisClientType;
 
-  constructor(private readonly jwtService: JwtService) {}
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  async onModuleInit() {
+    const redisUrl = this.configService.get<string>('REDIS_URL');
+    if (!redisUrl) {
+      return;
+    }
+    try {
+      this.redisPublisher = createClient({ url: redisUrl });
+      this.redisSubscriber = this.redisPublisher.duplicate();
+      await this.redisPublisher.connect();
+      await this.redisSubscriber.connect();
+      await this.redisSubscriber.subscribe(this.channel, (message) => {
+        try {
+          const payload = JSON.parse(message) as {
+            type: 'notification' | 'announcement';
+            data: unknown;
+          };
+          if (payload.type === 'notification') {
+            this.notificationSubject.next(payload.data as Notification);
+          } else if (payload.type === 'announcement') {
+            this.announcementSubject.next(payload.data);
+          }
+        } catch (error) {
+          this.logger.warn('Failed to parse notification payload');
+        }
+      });
+    } catch (error) {
+      this.logger.warn('Redis notifications disabled');
+    }
+  }
+
+  async onModuleDestroy() {
+    try {
+      await this.redisSubscriber?.quit();
+      await this.redisPublisher?.quit();
+    } catch (error) {
+      this.logger.warn('Failed to close Redis connections');
+    }
+  }
 
   emit(notification: Notification) {
+    if (this.redisPublisher) {
+      void this.redisPublisher.publish(
+        this.channel,
+        JSON.stringify({ type: 'notification', data: notification }),
+      );
+      return;
+    }
     this.notificationSubject.next(notification);
   }
 
   emitAnnouncementChanged(payload: unknown = { changed: true }) {
+    if (this.redisPublisher) {
+      void this.redisPublisher.publish(
+        this.channel,
+        JSON.stringify({ type: 'announcement', data: payload }),
+      );
+      return;
+    }
     this.announcementSubject.next(payload);
   }
 
@@ -76,28 +141,28 @@ export class NotificationStreamService {
     const notifications = this.notificationSubject.asObservable().pipe(
       filter((notification) => this.matches(notification, context)),
       map((notification) => ({
-        event: 'notification',
+        type: 'notification',
         data: notification,
       })),
     );
 
     const keepAlive = interval(25000).pipe(
       map(() => ({
-        event: 'ping',
+        type: 'ping',
         data: { ts: Date.now() },
       })),
     );
 
     const announcements = this.announcementSubject.asObservable().pipe(
       map((payload) => ({
-        event: 'announcement',
+        type: 'announcement',
         data: payload ?? { changed: true },
       })),
     );
 
     return merge(notifications, announcements, keepAlive).pipe(
       startWith({
-        event: 'ready',
+        type: 'ready',
         data: { ok: true },
       }),
     );

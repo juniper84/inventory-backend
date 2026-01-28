@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ForbiddenException,
   Injectable,
@@ -762,7 +763,10 @@ export class ExportsService {
                 : attachment.url;
               const response = await fetch(downloadUrl);
               if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
+                throw new BadGatewayException({
+                  message: `HTTP ${response.status}`,
+                  errorCode: 'EXPORTS_HTTP_ERROR',
+                });
               }
               const buffer = Buffer.from(await response.arrayBuffer());
               files.push({

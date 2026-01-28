@@ -142,7 +142,10 @@ export class ImportsService {
   private ensureHeaders(headers: string[], required: string[]) {
     const missing = required.filter((key) => !headers.includes(key));
     if (missing.length) {
-      throw new BadRequestException(`Missing headers: ${missing.join(', ')}`);
+      throw new BadRequestException({
+        message: `Missing headers: ${missing.join(', ')}`,
+        errorCode: 'IMPORT_MISSING_HEADERS',
+      });
     }
   }
 

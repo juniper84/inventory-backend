@@ -146,7 +146,10 @@ export class NotesService {
         throw new BadRequestException('Link requires resource type and id.');
       }
       if (!ALLOWED_LINK_TYPES.has(resourceType)) {
-        throw new BadRequestException(`Unsupported link type: ${resourceType}`);
+        throw new BadRequestException({
+          message: `Unsupported link type: ${resourceType}`,
+          errorCode: 'NOTES_UNSUPPORTED_LINK_TYPE',
+        });
       }
       const resourceName = await resolveResourceName(this.prisma, {
         businessId,
@@ -154,7 +157,10 @@ export class NotesService {
         resourceId,
       });
       if (!resourceName) {
-        throw new BadRequestException(`Unknown resource for ${resourceType}.`);
+        throw new BadRequestException({
+          message: `Unknown resource for ${resourceType}.`,
+          errorCode: 'NOTES_UNKNOWN_RESOURCE',
+        });
       }
       resolved.push({ resourceType, resourceId, resourceName });
     }

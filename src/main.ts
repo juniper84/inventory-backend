@@ -2,10 +2,12 @@ import { NestFactory } from '@nestjs/core';
 import helmet from 'helmet';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { ApiExceptionFilter } from './common/filters/api-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.use(helmet());
+  app.useGlobalFilters(new ApiExceptionFilter());
   app.setGlobalPrefix('api/v1');
   app.enableCors();
   const config = new DocumentBuilder()

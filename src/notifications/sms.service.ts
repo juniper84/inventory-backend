@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 @Injectable()
@@ -68,7 +68,10 @@ export class SmsService {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Infobip SMS send failed: ${response.status} ${text}`);
+      throw new InternalServerErrorException({
+        message: `Infobip SMS send failed: ${response.status} ${text}`,
+        errorCode: 'SMS_SEND_FAILED',
+      });
     }
 
     return response.json();

@@ -1,4 +1,9 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { Prisma, PrismaClient } from '@prisma/client';
 
 @Injectable()
@@ -32,7 +37,10 @@ export class PrismaService
         $allModels: {
           delete({ model, args, query }) {
             if (protectedModels.has(model)) {
-              throw new Error(`Deletes are disabled for ${model}.`);
+              throw new ForbiddenException({
+                message: `Deletes are disabled for ${model}.`,
+                errorCode: 'PRISMA_DELETE_DISABLED',
+              });
             }
             return query(args);
           },
@@ -45,7 +53,10 @@ export class PrismaService
               return query(args);
             }
             if (protectedModels.has(model)) {
-              throw new Error(`Deletes are disabled for ${model}.`);
+              throw new ForbiddenException({
+                message: `Deletes are disabled for ${model}.`,
+                errorCode: 'PRISMA_DELETE_DISABLED',
+              });
             }
             return query(args);
           },
