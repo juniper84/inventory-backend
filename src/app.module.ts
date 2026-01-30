@@ -47,6 +47,7 @@ import { NotesModule } from './notes/notes.module';
 import { ApiMetricsInterceptor } from './metrics/api-metrics.interceptor';
 import { AuditContextInterceptor } from './audit/audit-context.interceptor';
 import { TenantThrottlerGuard } from './throttler/tenant-throttler.guard';
+import { BusinessStatusGuard } from './business/business-status.guard';
 
 @Module({
   imports: [
@@ -110,6 +111,10 @@ import { TenantThrottlerGuard } from './throttler/tenant-throttler.guard';
     {
       provide: APP_GUARD,
       useClass: TenantThrottlerGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: BusinessStatusGuard,
     },
     {
       provide: APP_GUARD,

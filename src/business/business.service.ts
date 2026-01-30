@@ -311,14 +311,14 @@ export class BusinessService {
     if (!business) {
       throw new BadRequestException('Business not found.');
     }
-    if (business.status === 'DELETED') {
+    if (business.status === 'ARCHIVED' || business.status === 'DELETED') {
       return business;
     }
 
     const [updated] = await this.prisma.$transaction([
       this.prisma.business.update({
         where: { id: businessId },
-        data: { status: 'DELETED' },
+        data: { status: 'ARCHIVED' },
       }),
       this.prisma.businessSettings.update({
         where: { businessId },
@@ -333,6 +333,32 @@ export class BusinessService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      action: 'BUSINESS_DELETE_REQUEST',
+      resourceType: 'Business',
+      resourceId: businessId,
+      outcome: 'SUCCESS',
+      reason: 'Owner requested deletion',
+      metadata: { requestedBy: user.email },
+      before: business as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+    });
+
+    const userIds = await this.prisma.businessUser
+      .findMany({
+        where: { businessId },
+        select: { userId: true },
+      })
+      .then((rows) => rows.map((row) => row.userId));
+    if (userIds.length) {
+      await this.prisma.refreshToken.updateMany({
+        where: { userId: { in: userIds }, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+    }
+
+    await this.auditService.logEvent({
+      businessId,
+      userId,
       action: 'BUSINESS_DELETE',
       resourceType: 'Business',
       resourceId: businessId,
@@ -340,6 +366,15 @@ export class BusinessService {
       metadata: { requestedBy: user.email },
       before: business as unknown as Record<string, unknown>,
       after: updated as unknown as Record<string, unknown>,
+    });
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      action: 'BUSINESS_FORCE_LOGOUT',
+      resourceType: 'Business',
+      resourceId: businessId,
+      outcome: 'SUCCESS',
+      metadata: { revokedUsers: userIds.length },
     });
 
     return updated;

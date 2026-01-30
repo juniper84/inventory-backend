@@ -193,7 +193,12 @@ export class PlatformController {
     @Req() req: { user?: { sub?: string } },
     @Param('id') id: string,
     @Body()
-    body: { reason?: string; confirmBusinessId?: string; confirmText?: string },
+    body: {
+      reason?: string;
+      confirmBusinessId?: string;
+      confirmText?: string;
+      dryRun?: boolean;
+    },
   ) {
     return this.platformService.purgeBusiness(
       id,
@@ -201,6 +206,7 @@ export class PlatformController {
       body.reason,
       body.confirmBusinessId,
       body.confirmText,
+      body.dryRun,
     );
   }
 

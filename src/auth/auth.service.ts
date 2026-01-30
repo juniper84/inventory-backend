@@ -105,7 +105,9 @@ export class AuthService {
         .filter(
           (membership) =>
             membership.business &&
-            !['SUSPENDED', 'DELETED'].includes(membership.business.status),
+            !['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(
+              membership.business.status,
+            ),
         )
         .map((membership) => ({
           businessId: membership.businessId,
@@ -146,7 +148,7 @@ export class AuthService {
       where: { id: resolvedBusinessId },
     });
 
-    if (!business || ['SUSPENDED', 'DELETED'].includes(business.status)) {
+    if (!business || ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)) {
       throw new UnauthorizedException('Business is not active.');
     }
 
@@ -276,6 +278,23 @@ export class AuthService {
 
     if (!membership || membership.status !== 'ACTIVE') {
       throw new UnauthorizedException('User is not active for this business.');
+    }
+
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId },
+    });
+    if (!business || ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)) {
+      await this.auditService.logEvent({
+        businessId,
+        userId: user.id,
+        action: 'AUTH_REFRESH_BLOCK',
+        resourceType: 'Business',
+        resourceId: businessId,
+        outcome: 'FAILURE',
+        reason: business?.status ?? 'NOT_FOUND',
+        metadata: requestMetadata,
+      });
+      throw new UnauthorizedException('Business is not active.');
     }
 
     const access = await this.rbacService.resolveUserAccess(
@@ -446,7 +465,7 @@ export class AuthService {
       .filter(
         (membership) =>
           membership.business &&
-          !['SUSPENDED', 'DELETED'].includes(membership.business.status),
+          !['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(membership.business.status),
       )
       .map((membership) => ({
         businessId: membership.businessId,
@@ -618,7 +637,9 @@ export class AuthService {
       .filter(
         (membership) =>
           membership.business &&
-          !['SUSPENDED', 'DELETED'].includes(membership.business.status),
+          !['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(
+            membership.business.status,
+          ),
       )
       .map((membership) => ({
         businessId: membership.businessId,
@@ -762,6 +783,13 @@ export class AuthService {
       throw new UnauthorizedException('User is not active for this business.');
     }
 
+    const business = await this.prisma.business.findUnique({
+      where: { id: data.businessId },
+    });
+    if (!business || ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)) {
+      throw new UnauthorizedException('Business is not active.');
+    }
+
     const access = await this.rbacService.resolveUserAccess(
       user.id,
       data.businessId,
@@ -812,13 +840,21 @@ export class AuthService {
       orderBy: { createdAt: 'desc' },
     });
 
-    return memberships.map((membership) => ({
-      businessId: membership.businessId,
-      businessName: membership.business.name,
-      status: membership.status,
-      businessStatus: membership.business.status,
-      defaultLanguage: membership.business.defaultLanguage,
-    }));
+    return memberships
+      .filter(
+        (membership) =>
+          membership.business &&
+          !['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(
+            membership.business.status,
+          ),
+      )
+      .map((membership) => ({
+        businessId: membership.businessId,
+        businessName: membership.business.name,
+        status: membership.status,
+        businessStatus: membership.business.status,
+        defaultLanguage: membership.business.defaultLanguage,
+      }));
   }
 
   async createPlatformAdmin(email: string, password: string) {

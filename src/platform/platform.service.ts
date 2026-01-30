@@ -277,6 +277,33 @@ export class PlatformService {
       where: { id: businessId },
       data: { status },
     });
+    const archivedStatuses = new Set<BusinessStatus>([
+      BusinessStatus.ARCHIVED,
+      BusinessStatus.DELETED,
+    ]);
+    if (archivedStatuses.has(status)) {
+      const userIds = await this.prisma.businessUser
+        .findMany({
+          where: { businessId },
+          select: { userId: true },
+        })
+        .then((rows) => rows.map((row) => row.userId));
+      if (userIds.length) {
+        await this.prisma.refreshToken.updateMany({
+          where: { userId: { in: userIds }, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
+      await this.logPlatformAction({
+        platformAdminId,
+        action: 'BUSINESS_FORCE_LOGOUT',
+        resourceType: 'Business',
+        resourceId: businessId,
+        businessId,
+        reason: 'Business deleted',
+        metadata: { revokedUsers: userIds.length },
+      });
+    }
     await this.auditService.logEvent({
       businessId,
       userId: platformAdminId,
@@ -307,15 +334,18 @@ export class PlatformService {
     reason?: string,
     confirmBusinessId?: string,
     confirmText?: string,
+    dryRun?: boolean,
   ) {
     if (!reason) {
       throw new BadRequestException('Reason is required.');
     }
-    if (confirmBusinessId !== businessId) {
-      throw new BadRequestException('Business ID confirmation does not match.');
-    }
-    if (confirmText !== 'DELETE') {
-      throw new BadRequestException('Confirmation text does not match.');
+    if (!dryRun) {
+      if (confirmBusinessId !== businessId) {
+        throw new BadRequestException('Business ID confirmation does not match.');
+      }
+      if (confirmText !== 'DELETE') {
+        throw new BadRequestException('Confirmation text does not match.');
+      }
     }
 
     const business = await this.prisma.business.findUnique({
@@ -324,7 +354,11 @@ export class PlatformService {
     if (!business) {
       throw new BadRequestException('Business not found.');
     }
-    if (business.status !== BusinessStatus.DELETED) {
+    const archivedStatuses = new Set<BusinessStatus>([
+      BusinessStatus.ARCHIVED,
+      BusinessStatus.DELETED,
+    ]);
+    if (!archivedStatuses.has(business.status)) {
       throw new BadRequestException('Business must be archived before purge.');
     }
 
@@ -338,6 +372,7 @@ export class PlatformService {
       supplierReturnIds,
       transferIds,
       priceListIds,
+      businessUserIds,
     ] = await Promise.all([
       this.prisma.branch.findMany({
         where: { businessId },
@@ -375,6 +410,10 @@ export class PlatformService {
         where: { businessId },
         select: { id: true },
       }),
+      this.prisma.businessUser.findMany({
+        where: { businessId },
+        select: { userId: true },
+      }),
     ]);
 
     const saleIdList = saleIds.map((item) => item.id);
@@ -385,12 +424,57 @@ export class PlatformService {
     const transferIdList = transferIds.map((item) => item.id);
     const priceListIdList = priceListIds.map((item) => item.id);
     const roleIdList = roleIds.map((item) => item.id);
+    const userIdList = businessUserIds.map((item) => item.userId);
+
+    if (dryRun) {
+      const [
+        businessUserCount,
+        offlineDeviceCount,
+        offlineActionCount,
+        stockMovementCount,
+        stockSnapshotCount,
+        notificationCount,
+        auditLogCount,
+      ] = await Promise.all([
+        this.prisma.businessUser.count({ where: { businessId } }),
+        this.prisma.offlineDevice.count({ where: { businessId } }),
+        this.prisma.offlineAction.count({ where: { businessId } }),
+        this.prisma.stockMovement.count({ where: { businessId } }),
+        this.prisma.stockSnapshot.count({ where: { businessId } }),
+        this.prisma.notification.count({ where: { businessId } }),
+        this.prisma.auditLog.count({ where: { businessId } }),
+      ]);
+      return {
+        dryRun: true,
+        businessId,
+        counts: {
+          branches: branchIds.length,
+          roles: roleIdList.length,
+          sales: saleIdList.length,
+          refunds: refundIdList.length,
+          purchases: purchaseIdList.length,
+          purchaseOrders: purchaseOrderIdList.length,
+          supplierReturns: supplierReturnIdList.length,
+          transfers: transferIdList.length,
+          priceLists: priceListIdList.length,
+          businessUsers: businessUserCount,
+          offlineDevices: offlineDeviceCount,
+          offlineActions: offlineActionCount,
+          stockMovements: stockMovementCount,
+          stockSnapshots: stockSnapshotCount,
+          notifications: notificationCount,
+          auditLogs: auditLogCount,
+        },
+      };
+    }
 
     await this.prisma.$transaction(async (tx) => {
       await tx.noteReminder.deleteMany({ where: { businessId } });
       await tx.noteLink.deleteMany({ where: { businessId } });
       await tx.note.deleteMany({ where: { businessId } });
       await tx.notification.deleteMany({ where: { businessId } });
+      await tx.offlineAction.deleteMany({ where: { businessId } });
+      await tx.offlineDevice.deleteMany({ where: { businessId } });
       await tx.approval.deleteMany({ where: { businessId } });
       await tx.approvalPolicy.deleteMany({ where: { businessId } });
       await tx.exportJob.deleteMany({ where: { businessId } });
@@ -491,6 +575,13 @@ export class PlatformService {
       await tx.priceList.deleteMany({ where: { businessId } });
       await tx.business.delete({ where: { id: businessId } });
     });
+
+    if (userIdList.length) {
+      await this.prisma.refreshToken.updateMany({
+        where: { userId: { in: userIdList }, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+    }
 
     await this.logPlatformAction({
       platformAdminId,
