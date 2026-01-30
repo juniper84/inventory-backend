@@ -51,8 +51,19 @@ export class NotificationStreamService implements OnModuleInit, OnModuleDestroy 
       return;
     }
     try {
-      this.redisPublisher = createClient({ url: redisUrl });
+      this.redisPublisher = createClient({
+        url: redisUrl,
+        socket: {
+          reconnectStrategy: (retries) => Math.min(retries * 250, 5000),
+        },
+      });
       this.redisSubscriber = this.redisPublisher.duplicate();
+      this.redisPublisher.on('error', (error) => {
+        this.logger.warn(`Redis publisher error: ${error?.message ?? error}`);
+      });
+      this.redisSubscriber.on('error', (error) => {
+        this.logger.warn(`Redis subscriber error: ${error?.message ?? error}`);
+      });
       await this.redisPublisher.connect();
       await this.redisSubscriber.connect();
       await this.redisSubscriber.subscribe(this.channel, (message) => {
@@ -72,6 +83,8 @@ export class NotificationStreamService implements OnModuleInit, OnModuleDestroy 
       });
     } catch (error) {
       this.logger.warn('Redis notifications disabled');
+      this.redisSubscriber = undefined;
+      this.redisPublisher = undefined;
     }
   }
 
