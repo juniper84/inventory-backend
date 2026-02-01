@@ -37,6 +37,7 @@ export class NotificationStreamService implements OnModuleInit, OnModuleDestroy 
   private readonly notificationSubject = new Subject<Notification>();
   private readonly announcementSubject = new Subject<unknown>();
   private readonly channel = 'nvi:notifications';
+  private lastRedisErrorLogAt = 0;
   private redisPublisher?: RedisClientType;
   private redisSubscriber?: RedisClientType;
 
@@ -59,10 +60,10 @@ export class NotificationStreamService implements OnModuleInit, OnModuleDestroy 
       });
       this.redisSubscriber = this.redisPublisher.duplicate();
       this.redisPublisher.on('error', (error) => {
-        this.logger.warn(`Redis publisher error: ${error?.message ?? error}`);
+        this.logRedisError('publisher', error);
       });
       this.redisSubscriber.on('error', (error) => {
-        this.logger.warn(`Redis subscriber error: ${error?.message ?? error}`);
+        this.logRedisError('subscriber', error);
       });
       await this.redisPublisher.connect();
       await this.redisSubscriber.connect();
@@ -198,5 +199,18 @@ export class NotificationStreamService implements OnModuleInit, OnModuleDestroy 
       return context.permissions.includes(notification.permission);
     }
     return true;
+  }
+
+  private logRedisError(channel: 'publisher' | 'subscriber', error: unknown) {
+    const now = Date.now();
+    if (now - this.lastRedisErrorLogAt < 30000) {
+      return;
+    }
+    this.lastRedisErrorLogAt = now;
+    this.logger.warn(
+      `Redis ${channel} error: ${
+        error instanceof Error ? error.message : String(error)
+      } (throttled)`
+    );
   }
 }
