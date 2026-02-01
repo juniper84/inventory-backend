@@ -5,6 +5,9 @@ import { SetMetadata } from '@nestjs/common';
 import { IS_PUBLIC_KEY } from '../auth/public.decorator';
 import { AuditService } from '../audit/audit.service';
 import { buildRequestMetadata } from '../audit/audit.utils';
+import { SubscriptionStatus } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { ConfigService } from '@nestjs/config';
 
 export const SUBSCRIPTION_BYPASS_KEY = 'subscriptionBypass';
 export const SubscriptionBypass = () =>
@@ -16,6 +19,8 @@ export class SubscriptionGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly subscriptionService: SubscriptionService,
     private readonly auditService: AuditService,
+    private readonly prisma: PrismaService,
+    private readonly configService: ConfigService,
   ) {}
 
   async canActivate(context: ExecutionContext) {
@@ -66,19 +71,167 @@ export class SubscriptionGuard implements CanActivate {
       return false;
     }
 
-    if (['EXPIRED', 'SUSPENDED'].includes(subscription.status)) {
-      if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+    const now = new Date();
+    const graceDays = parseInt(
+      this.configService.get<string>('subscription.expiredGraceDays') ??
+        this.configService.get<string>('subscription.graceDays') ??
+        '3',
+      10,
+    );
+    const graceDurationMs = Math.max(graceDays, 0) * 24 * 60 * 60 * 1000;
+
+    const trialEnded =
+      subscription.status === SubscriptionStatus.TRIAL &&
+      subscription.trialEndsAt &&
+      subscription.trialEndsAt.getTime() <= now.getTime();
+    const expiredAtPassed =
+      subscription.status === SubscriptionStatus.ACTIVE &&
+      subscription.expiresAt &&
+      subscription.expiresAt.getTime() <= now.getTime();
+    const graceActive =
+      (subscription.status === SubscriptionStatus.GRACE ||
+        (trialEnded && subscription.graceEndsAt)) &&
+      subscription.graceEndsAt &&
+      subscription.graceEndsAt.getTime() > now.getTime();
+    const graceEnded =
+      (subscription.status === SubscriptionStatus.GRACE ||
+        (trialEnded && subscription.graceEndsAt)) &&
+      subscription.graceEndsAt &&
+      subscription.graceEndsAt.getTime() <= now.getTime();
+    const expiredByDate =
+      (subscription.expiresAt &&
+        subscription.expiresAt.getTime() <= now.getTime()) ||
+      (trialEnded && !subscription.graceEndsAt) ||
+      graceEnded;
+
+    let effectiveStatus = subscription.status;
+    if (trialEnded && subscription.graceEndsAt) {
+      effectiveStatus = graceActive
+        ? SubscriptionStatus.GRACE
+        : SubscriptionStatus.EXPIRED;
+    } else if (trialEnded) {
+      effectiveStatus = SubscriptionStatus.EXPIRED;
+    } else if (expiredAtPassed && !subscription.graceEndsAt && graceDays > 0) {
+      effectiveStatus = SubscriptionStatus.GRACE;
+    } else if (expiredByDate) {
+      effectiveStatus = SubscriptionStatus.EXPIRED;
+    } else if (subscription.status === SubscriptionStatus.GRACE && graceEnded) {
+      effectiveStatus = SubscriptionStatus.EXPIRED;
+    }
+
+    if (effectiveStatus !== subscription.status || expiredAtPassed) {
+      const record = await this.prisma.subscription.findUnique({
+        where: { businessId: user.businessId },
+      });
+      if (record) {
+        if (
+          effectiveStatus === SubscriptionStatus.GRACE &&
+          (record.status !== SubscriptionStatus.GRACE || !record.graceEndsAt)
+        ) {
+          const graceEndsAt = record.graceEndsAt
+            ? record.graceEndsAt
+            : new Date(now.getTime() + graceDurationMs);
+          const updated = await this.prisma.subscription.update({
+            where: { id: record.id },
+            data: { status: SubscriptionStatus.GRACE, graceEndsAt },
+            select: { id: true, status: true, graceEndsAt: true, tier: true },
+          });
+          await this.prisma.subscriptionHistory.create({
+            data: {
+              businessId: record.businessId,
+              previousStatus: record.status,
+              newStatus: SubscriptionStatus.GRACE,
+              previousTier: record.tier,
+              newTier: record.tier,
+              changedByPlatformAdminId: null,
+              reason: 'Auto-grace',
+              metadata: {
+                graceEndsAt: graceEndsAt.toISOString(),
+              },
+            },
+          });
+          await this.auditService.logEvent({
+            businessId: record.businessId,
+            action: 'SUBSCRIPTION_STATUS_SYNC',
+            resourceType: 'Subscription',
+            resourceId: record.id,
+            outcome: 'SUCCESS',
+            metadata: {
+              status: updated.status,
+              graceEndsAt: graceEndsAt.toISOString(),
+            },
+          });
+        }
+
+        if (effectiveStatus === SubscriptionStatus.EXPIRED) {
+          const expiresAt = record.expiresAt ?? now;
+          const updated = await this.prisma.subscription.update({
+            where: { id: record.id },
+            data: { status: SubscriptionStatus.EXPIRED, expiresAt },
+            select: { id: true, status: true, expiresAt: true, tier: true },
+          });
+          await this.prisma.businessSettings.updateMany({
+            where: { businessId: record.businessId, readOnlyEnabled: false },
+            data: {
+              readOnlyEnabled: true,
+              readOnlyReason:
+                record.status === SubscriptionStatus.TRIAL
+                  ? 'Trial expired. Please subscribe to continue.'
+                  : 'Subscription expired. Please pay to continue.',
+              readOnlyEnabledAt: now,
+            },
+          });
+          await this.prisma.offlineDevice.updateMany({
+            where: { businessId: record.businessId, status: 'ACTIVE' },
+            data: { status: 'REVOKED', revokedAt: now },
+          });
+          await this.prisma.subscriptionHistory.create({
+            data: {
+              businessId: record.businessId,
+              previousStatus: record.status,
+              newStatus: SubscriptionStatus.EXPIRED,
+              previousTier: record.tier,
+              newTier: record.tier,
+              changedByPlatformAdminId: null,
+              reason: 'Auto-expired',
+              metadata: { expiresAt: expiresAt.toISOString() },
+            },
+          });
+          await this.auditService.logEvent({
+            businessId: record.businessId,
+            action: 'SUBSCRIPTION_STATUS_SYNC',
+            resourceType: 'Subscription',
+            resourceId: record.id,
+            outcome: 'SUCCESS',
+            metadata: {
+              status: updated.status,
+              expiresAt: expiresAt.toISOString(),
+            },
+          });
+        }
+      }
+    }
+
+    request.subscription = { ...subscription, status: effectiveStatus };
+
+    const isExpiredOrSuspended =
+      effectiveStatus === SubscriptionStatus.SUSPENDED ||
+      effectiveStatus === SubscriptionStatus.EXPIRED;
+
+    if (isExpiredOrSuspended || effectiveStatus === SubscriptionStatus.GRACE) {
+      const methodAllowed = ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
+      if (!methodAllowed) {
         await this.auditService.logEvent({
           businessId: user.businessId,
           userId: user.sub,
           action: 'SUBSCRIPTION_BLOCK',
           resourceType: 'Subscription',
           outcome: 'FAILURE',
-          reason: subscription.status,
+          reason: isExpiredOrSuspended ? 'EXPIRED' : 'GRACE',
           metadata: buildRequestMetadata(request),
         });
       }
-      return ['GET', 'HEAD', 'OPTIONS'].includes(request.method);
+      return methodAllowed;
     }
 
     await this.auditService.logEvent({
