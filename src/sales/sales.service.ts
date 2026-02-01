@@ -918,6 +918,7 @@ export class SalesService {
       (sum, payment) => sum + payment.amount,
       0,
     );
+    const hasCashPayment = payments.some((payment) => payment.method === 'CASH');
     const creditEnabled = posPolicies.creditEnabled ?? false;
     const creditRequested = paymentsTotal < Number(sale.total) - 0.01;
     if (creditRequested && !creditEnabled) {
@@ -929,7 +930,7 @@ export class SalesService {
         throw new BadRequestException('Credit sales require permission.');
       }
     }
-    if (paymentsTotal > Number(sale.total) + 0.01) {
+    if (paymentsTotal > Number(sale.total) + 0.01 && !hasCashPayment) {
       throw new BadRequestException('Payments cannot exceed sale total.');
     }
     if (!creditRequested && payments.length === 0) {
