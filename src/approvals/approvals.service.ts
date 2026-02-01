@@ -514,9 +514,13 @@ export class ApprovalsService {
       stockAdjust?: boolean;
       stockAdjustThresholdAmount?: number | null;
       refund?: boolean;
+      refundThresholdAmount?: number | null;
       purchase?: boolean;
+      purchaseThresholdAmount?: number | null;
       transfer?: boolean;
+      transferThresholdAmount?: number | null;
       expense?: boolean;
+      expenseThresholdAmount?: number | null;
       discountThresholdPercent?: number | null;
       discountThresholdAmount?: number | null;
     };
@@ -558,7 +562,23 @@ export class ApprovalsService {
       }
       case 'SALE_REFUND':
       case 'RETURN_WITHOUT_RECEIPT':
-        return approvalDefaults.refund ? requireAll() : null;
+        if (!approvalDefaults.refund) {
+          return null;
+        }
+        if (
+          typeof approvalDefaults.refundThresholdAmount === 'number' &&
+          approvalDefaults.refundThresholdAmount > 0
+        ) {
+          return {
+            thresholdType: ApprovalThresholdType.AMOUNT,
+            thresholdValue: new Prisma.Decimal(
+              approvalDefaults.refundThresholdAmount,
+            ),
+            requiredRoleIds: [],
+            allowSelfApprove: false,
+          };
+        }
+        return requireAll();
       case 'STOCK_ADJUSTMENT':
       case 'STOCK_COUNT':
         if (!approvalDefaults.stockAdjust) {
@@ -579,14 +599,62 @@ export class ApprovalsService {
         }
         return requireAll();
       case 'TRANSFER_APPROVAL':
-        return approvalDefaults.transfer ? requireAll() : null;
+        if (!approvalDefaults.transfer) {
+          return null;
+        }
+        if (
+          typeof approvalDefaults.transferThresholdAmount === 'number' &&
+          approvalDefaults.transferThresholdAmount > 0
+        ) {
+          return {
+            thresholdType: ApprovalThresholdType.AMOUNT,
+            thresholdValue: new Prisma.Decimal(
+              approvalDefaults.transferThresholdAmount,
+            ),
+            requiredRoleIds: [],
+            allowSelfApprove: false,
+          };
+        }
+        return requireAll();
       case 'PURCHASE_CREATE':
       case 'PURCHASE_ORDER_APPROVAL':
       case 'PURCHASE_ORDER_EDIT':
       case 'SUPPLIER_RETURN':
-        return approvalDefaults.purchase ? requireAll() : null;
+        if (!approvalDefaults.purchase) {
+          return null;
+        }
+        if (
+          typeof approvalDefaults.purchaseThresholdAmount === 'number' &&
+          approvalDefaults.purchaseThresholdAmount > 0
+        ) {
+          return {
+            thresholdType: ApprovalThresholdType.AMOUNT,
+            thresholdValue: new Prisma.Decimal(
+              approvalDefaults.purchaseThresholdAmount,
+            ),
+            requiredRoleIds: [],
+            allowSelfApprove: false,
+          };
+        }
+        return requireAll();
       case 'EXPENSE_CREATE':
-        return approvalDefaults.expense ? requireAll() : null;
+        if (!approvalDefaults.expense) {
+          return null;
+        }
+        if (
+          typeof approvalDefaults.expenseThresholdAmount === 'number' &&
+          approvalDefaults.expenseThresholdAmount > 0
+        ) {
+          return {
+            thresholdType: ApprovalThresholdType.AMOUNT,
+            thresholdValue: new Prisma.Decimal(
+              approvalDefaults.expenseThresholdAmount,
+            ),
+            requiredRoleIds: [],
+            allowSelfApprove: false,
+          };
+        }
+        return requireAll();
       default:
         return null;
     }

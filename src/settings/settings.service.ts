@@ -127,6 +127,141 @@ export class SettingsService {
     } as Prisma.InputJsonValue;
   }
 
+  private buildAmountThreshold(amount?: number | null) {
+    if (typeof amount === 'number' && amount > 0) {
+      return { thresholdType: 'AMOUNT' as const, thresholdValue: amount };
+    }
+    return { thresholdType: 'NONE' as const, thresholdValue: null };
+  }
+
+  private async upsertApprovalPolicy(
+    businessId: string,
+    actionType: string,
+    data: { thresholdType: 'NONE' | 'PERCENT' | 'AMOUNT'; thresholdValue: number | null },
+    enabled: boolean,
+  ) {
+    const existing = await this.prisma.approvalPolicy.findFirst({
+      where: { businessId, actionType },
+    });
+    if (!existing) {
+      if (!enabled) {
+        return;
+      }
+      await this.prisma.approvalPolicy.create({
+        data: {
+          businessId,
+          actionType,
+          thresholdType: data.thresholdType,
+          thresholdValue:
+            data.thresholdValue === null ? null : new Prisma.Decimal(data.thresholdValue),
+          requiredRoleIds: [],
+          allowSelfApprove: false,
+          status: 'ACTIVE',
+        },
+      });
+      return;
+    }
+    await this.prisma.approvalPolicy.update({
+      where: { id: existing.id },
+      data: {
+        thresholdType: data.thresholdType,
+        thresholdValue:
+          data.thresholdValue === null ? null : new Prisma.Decimal(data.thresholdValue),
+        status: enabled ? 'ACTIVE' : 'INACTIVE',
+      },
+    });
+  }
+
+  private async syncApprovalDefaultPolicies(
+    businessId: string,
+    defaults: typeof DEFAULT_APPROVAL_DEFAULTS,
+  ) {
+    await this.upsertApprovalPolicy(
+      businessId,
+      'SALE_REFUND',
+      this.buildAmountThreshold(defaults.refundThresholdAmount),
+      defaults.refund,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'RETURN_WITHOUT_RECEIPT',
+      this.buildAmountThreshold(defaults.refundThresholdAmount),
+      defaults.refund,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'STOCK_ADJUSTMENT',
+      this.buildAmountThreshold(defaults.stockAdjustThresholdAmount),
+      defaults.stockAdjust,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'STOCK_COUNT',
+      this.buildAmountThreshold(defaults.stockAdjustThresholdAmount),
+      defaults.stockAdjust,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'TRANSFER_APPROVAL',
+      this.buildAmountThreshold(defaults.transferThresholdAmount),
+      defaults.transfer,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'PURCHASE_CREATE',
+      this.buildAmountThreshold(defaults.purchaseThresholdAmount),
+      defaults.purchase,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'PURCHASE_ORDER_APPROVAL',
+      this.buildAmountThreshold(defaults.purchaseThresholdAmount),
+      defaults.purchase,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'PURCHASE_ORDER_EDIT',
+      this.buildAmountThreshold(defaults.purchaseThresholdAmount),
+      defaults.purchase,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'SUPPLIER_RETURN',
+      this.buildAmountThreshold(defaults.purchaseThresholdAmount),
+      defaults.purchase,
+    );
+    await this.upsertApprovalPolicy(
+      businessId,
+      'EXPENSE_CREATE',
+      this.buildAmountThreshold(defaults.expenseThresholdAmount),
+      defaults.expense,
+    );
+
+    const discountPercent =
+      typeof defaults.discountThresholdPercent === 'number'
+        ? defaults.discountThresholdPercent
+        : null;
+    const discountAmount =
+      typeof defaults.discountThresholdAmount === 'number'
+        ? defaults.discountThresholdAmount
+        : null;
+    const discountThreshold =
+      discountPercent && discountPercent > 0
+        ? { thresholdType: 'PERCENT' as const, thresholdValue: discountPercent }
+        : discountAmount && discountAmount > 0
+          ? { thresholdType: 'AMOUNT' as const, thresholdValue: discountAmount }
+          : { thresholdType: 'NONE' as const, thresholdValue: null };
+    const discountEnabled =
+      (discountPercent !== null && discountPercent > 0) ||
+      (discountAmount !== null && discountAmount > 0);
+    await this.upsertApprovalPolicy(
+      businessId,
+      'SALE_DISCOUNT',
+      discountThreshold,
+      discountEnabled,
+    );
+  }
+
   private mergeOnboarding(
     current?: Record<string, unknown> | null,
   ): Prisma.InputJsonValue {
@@ -242,14 +377,16 @@ export class SettingsService {
       previousNotificationDefaults,
     );
 
+    const nextApprovalDefaults = this.mergeApprovalDefaults(
+      (data.approvalDefaults ??
+        existing.approvalDefaults ??
+        DEFAULT_APPROVAL_DEFAULTS) as Record<string, unknown>,
+    ) as typeof DEFAULT_APPROVAL_DEFAULTS;
+
     const updated = await this.prisma.businessSettings.update({
       where: { businessId },
       data: {
-        approvalDefaults: this.mergeApprovalDefaults(
-          (data.approvalDefaults ??
-            existing.approvalDefaults ??
-            DEFAULT_APPROVAL_DEFAULTS) as Record<string, unknown>,
-        ),
+        approvalDefaults: nextApprovalDefaults as Prisma.InputJsonValue,
         notificationDefaults: nextNotificationDefaults as Prisma.InputJsonValue,
         stockPolicies: (data.stockPolicies ??
           existing.stockPolicies ??
@@ -276,6 +413,9 @@ export class SettingsService {
       before: existing as unknown as Record<string, unknown>,
       after: updated as unknown as Record<string, unknown>,
     });
+    if (data.approvalDefaults) {
+      await this.syncApprovalDefaultPolicies(businessId, nextApprovalDefaults);
+    }
     return updated;
   }
 }

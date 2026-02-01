@@ -417,6 +417,7 @@ export class TransfersService {
   ) {
     const transfer = await this.prisma.transfer.findFirst({
       where: { id: transferId, businessId },
+      include: { items: true },
     });
     if (!transfer) {
       return null;
@@ -426,11 +427,16 @@ export class TransfersService {
       return transfer;
     }
 
+    const transferQuantity = transfer.items.reduce(
+      (sum, item) => sum.plus(item.quantity),
+      new Prisma.Decimal(0),
+    );
     const approval = await this.approvalsService.requestApproval({
       businessId,
       actionType: 'TRANSFER_APPROVAL',
       requestedByUserId: userId,
       requesterRoleIds: roleIds,
+      amount: transferQuantity.toNumber(),
       metadata: { transferId },
       targetType: 'Transfer',
       targetId: transferId,

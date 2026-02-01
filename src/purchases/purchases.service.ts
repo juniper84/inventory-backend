@@ -836,13 +836,18 @@ export class PurchasesService {
     if (!po) {
       return null;
     }
+    const requestedTotal = data.lines.reduce(
+      (sum, line) =>
+        sum.plus(new Prisma.Decimal(line.quantity).mul(line.unitCost)),
+      new Prisma.Decimal(0),
+    );
     if (po.status === PurchaseStatus.APPROVED) {
       const approval = await this.approvalsService.requestApproval({
         businessId,
         actionType: 'PURCHASE_ORDER_EDIT',
         requestedByUserId: userId,
         requesterRoleIds: roleIds,
-        amount: null,
+        amount: requestedTotal.toNumber(),
         metadata: { purchaseOrderId, lines: data.lines },
         targetType: 'PurchaseOrder',
         targetId: purchaseOrderId,
@@ -958,17 +963,22 @@ export class PurchasesService {
   ) {
     const po = await this.prisma.purchaseOrder.findFirst({
       where: { id: purchaseOrderId, businessId },
+      include: { lines: true },
     });
     if (!po) {
       return null;
     }
+    const total = po.lines.reduce(
+      (sum, line) => sum.plus(line.quantity.mul(line.unitCost)),
+      new Prisma.Decimal(0),
+    );
 
     const approval = await this.approvalsService.requestApproval({
       businessId,
       actionType: 'PURCHASE_ORDER_APPROVAL',
       requestedByUserId: userId,
       requesterRoleIds: roleIds,
-      amount: null,
+      amount: total.toNumber(),
       metadata: { purchaseOrderId },
       targetType: 'PurchaseOrder',
       targetId: purchaseOrderId,
@@ -1588,12 +1598,17 @@ export class PurchasesService {
       );
     }
 
+    const returnTotal = data.lines.reduce(
+      (sum, line) =>
+        sum.plus(new Prisma.Decimal(line.quantity).mul(line.unitCost)),
+      new Prisma.Decimal(0),
+    );
     const approval = await this.approvalsService.requestApproval({
       businessId,
       actionType: 'SUPPLIER_RETURN',
       requestedByUserId: userId,
       requesterRoleIds: roleIds,
-      amount: null,
+      amount: returnTotal.toNumber(),
       metadata: data,
       targetType: 'SupplierReturn',
     });

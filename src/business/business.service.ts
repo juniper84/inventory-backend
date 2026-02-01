@@ -112,6 +112,17 @@ export class BusinessService {
       requiredRoleIds: string[];
       allowSelfApprove: boolean;
     }>;
+    const buildAmountPolicy = (actionType: string, threshold?: number | null) =>
+      ({
+        businessId: business.id,
+        actionType,
+        thresholdType:
+          typeof threshold === 'number' && threshold > 0 ? 'AMOUNT' : 'NONE',
+        thresholdValue:
+          typeof threshold === 'number' && threshold > 0 ? threshold : null,
+        requiredRoleIds: [],
+        allowSelfApprove: false,
+      }) satisfies (typeof approvalPolicies)[number];
 
     const discountThresholdPercent = approvalDefaults.discountThresholdPercent;
     const discountThresholdAmount = approvalDefaults.discountThresholdAmount;
@@ -140,93 +151,67 @@ export class BusinessService {
 
     if (approvalDefaults.refund) {
       approvalPolicies.push(
-        {
-          businessId: business.id,
-          actionType: 'SALE_REFUND',
-          thresholdType: 'NONE',
-          requiredRoleIds: [],
-          allowSelfApprove: false,
-        },
-        {
-          businessId: business.id,
-          actionType: 'RETURN_WITHOUT_RECEIPT',
-          thresholdType: 'NONE',
-          requiredRoleIds: [],
-          allowSelfApprove: false,
-        },
+        buildAmountPolicy(
+          'SALE_REFUND',
+          approvalDefaults.refundThresholdAmount,
+        ),
+        buildAmountPolicy(
+          'RETURN_WITHOUT_RECEIPT',
+          approvalDefaults.refundThresholdAmount,
+        ),
       );
     }
 
     if (approvalDefaults.stockAdjust) {
       approvalPolicies.push(
-        {
-          businessId: business.id,
-          actionType: 'STOCK_ADJUSTMENT',
-          thresholdType: 'NONE',
-          requiredRoleIds: [],
-          allowSelfApprove: false,
-        },
-        {
-          businessId: business.id,
-          actionType: 'STOCK_COUNT',
-          thresholdType: 'NONE',
-          requiredRoleIds: [],
-          allowSelfApprove: false,
-        },
+        buildAmountPolicy(
+          'STOCK_ADJUSTMENT',
+          approvalDefaults.stockAdjustThresholdAmount,
+        ),
+        buildAmountPolicy(
+          'STOCK_COUNT',
+          approvalDefaults.stockAdjustThresholdAmount,
+        ),
       );
     }
 
     if (approvalDefaults.transfer) {
-      approvalPolicies.push({
-        businessId: business.id,
-        actionType: 'TRANSFER_APPROVAL',
-        thresholdType: 'NONE',
-        requiredRoleIds: [],
-        allowSelfApprove: false,
-      });
+      approvalPolicies.push(
+        buildAmountPolicy(
+          'TRANSFER_APPROVAL',
+          approvalDefaults.transferThresholdAmount,
+        ),
+      );
     }
 
     if (approvalDefaults.purchase) {
       approvalPolicies.push(
-        {
-          businessId: business.id,
-          actionType: 'PURCHASE_CREATE',
-          thresholdType: 'NONE',
-          requiredRoleIds: [],
-          allowSelfApprove: false,
-        },
-        {
-          businessId: business.id,
-          actionType: 'PURCHASE_ORDER_APPROVAL',
-          thresholdType: 'NONE',
-          requiredRoleIds: [],
-          allowSelfApprove: false,
-        },
-        {
-          businessId: business.id,
-          actionType: 'PURCHASE_ORDER_EDIT',
-          thresholdType: 'NONE',
-          requiredRoleIds: [],
-          allowSelfApprove: false,
-        },
-        {
-          businessId: business.id,
-          actionType: 'SUPPLIER_RETURN',
-          thresholdType: 'NONE',
-          requiredRoleIds: [],
-          allowSelfApprove: false,
-        },
+        buildAmountPolicy(
+          'PURCHASE_CREATE',
+          approvalDefaults.purchaseThresholdAmount,
+        ),
+        buildAmountPolicy(
+          'PURCHASE_ORDER_APPROVAL',
+          approvalDefaults.purchaseThresholdAmount,
+        ),
+        buildAmountPolicy(
+          'PURCHASE_ORDER_EDIT',
+          approvalDefaults.purchaseThresholdAmount,
+        ),
+        buildAmountPolicy(
+          'SUPPLIER_RETURN',
+          approvalDefaults.purchaseThresholdAmount,
+        ),
       );
     }
 
     if (approvalDefaults.expense) {
-      approvalPolicies.push({
-        businessId: business.id,
-        actionType: 'EXPENSE_CREATE',
-        thresholdType: 'NONE',
-        requiredRoleIds: [],
-        allowSelfApprove: false,
-      });
+      approvalPolicies.push(
+        buildAmountPolicy(
+          'EXPENSE_CREATE',
+          approvalDefaults.expenseThresholdAmount,
+        ),
+      );
     }
 
     await this.prisma.approvalPolicy.createMany({

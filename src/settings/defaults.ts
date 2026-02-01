@@ -2,9 +2,13 @@ export const DEFAULT_APPROVAL_DEFAULTS = {
   stockAdjust: true,
   stockAdjustThresholdAmount: null,
   refund: true,
+  refundThresholdAmount: null,
   purchase: true,
+  purchaseThresholdAmount: null,
   transfer: true,
+  transferThresholdAmount: null,
   expense: false,
+  expenseThresholdAmount: null,
   discountThresholdPercent: 10,
   discountThresholdAmount: null,
 };
