@@ -683,6 +683,20 @@ export class PlatformService {
       },
     });
     return Promise.all([existing, subscription]).then(([before, after]) => {
+      if (
+        data.status &&
+        (data.status === SubscriptionStatus.ACTIVE ||
+          data.status === SubscriptionStatus.TRIAL)
+      ) {
+        this.prisma.businessSettings.updateMany({
+          where: { businessId, readOnlyEnabled: true },
+          data: {
+            readOnlyEnabled: false,
+            readOnlyReason: null,
+            readOnlyEnabledAt: null,
+          },
+        });
+      }
       if (after.status === SubscriptionStatus.EXPIRED) {
         this.prisma.offlineDevice.updateMany({
           where: { businessId, status: 'ACTIVE' },

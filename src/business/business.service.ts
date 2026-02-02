@@ -398,8 +398,13 @@ export class BusinessService {
       where: { code: { in: Object.values(PermissionsList) } },
     });
 
+    const adminForbidden = new Set<string>([
+      PermissionsList.BUSINESS_DELETE,
+      PermissionsList.ROLES_CREATE,
+      PermissionsList.ROLES_UPDATE,
+    ]);
     const withoutBusinessDelete = permissions
-      .filter((perm) => perm.code !== PermissionsList.BUSINESS_DELETE)
+      .filter((perm) => !adminForbidden.has(perm.code))
       .map((perm) => perm.id);
 
     const rolePermissionsMap: Record<string, string[]> = {

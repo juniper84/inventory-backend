@@ -7,6 +7,8 @@ import {
   parsePagination,
   PaginationQuery,
 } from '../common/pagination';
+import { PermissionsList } from '../rbac/permissions';
+import { ForbiddenException } from '@nestjs/common';
 
 @Injectable()
 export class RolesService {
@@ -14,6 +16,32 @@ export class RolesService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
   ) {}
+
+  private async enforceAdminPermissionRules(businessId: string) {
+    const adminRole = await this.prisma.role.findFirst({
+      where: { businessId, name: 'Admin' },
+      select: { id: true },
+    });
+    if (!adminRole) {
+      return;
+    }
+    const forbiddenCodes = [
+      PermissionsList.BUSINESS_DELETE,
+      PermissionsList.ROLES_CREATE,
+      PermissionsList.ROLES_UPDATE,
+    ];
+    const forbiddenPermissions = await this.prisma.permission.findMany({
+      where: { code: { in: forbiddenCodes } },
+      select: { id: true },
+    });
+    const forbiddenIds = forbiddenPermissions.map((perm) => perm.id);
+    if (!forbiddenIds.length) {
+      return;
+    }
+    await this.prisma.rolePermission.deleteMany({
+      where: { roleId: adminRole.id, permissionId: { in: forbiddenIds } },
+    });
+  }
 
   async list(
     businessId: string,
@@ -23,6 +51,7 @@ export class RolesService {
       permissionCount?: string;
     },
   ) {
+    await this.enforceAdminPermissionRules(businessId);
     const pagination = parsePagination(query);
     const search = query.search?.trim();
     const scope = query.scope?.toLowerCase();
@@ -54,6 +83,7 @@ export class RolesService {
   }
 
   async getRolePermissions(businessId: string, roleId: string) {
+    await this.enforceAdminPermissionRules(businessId);
     const role = await this.prisma.role.findFirst({
       where: { id: roleId, businessId },
       include: { rolePermissions: true },
@@ -121,6 +151,25 @@ export class RolesService {
     });
     if (!role) {
       return null;
+    }
+    if (role.name === 'System Owner') {
+      throw new ForbiddenException('System Owner permissions are locked.');
+    }
+
+    if (role.name === 'Admin') {
+      const forbiddenCodes = [
+        PermissionsList.BUSINESS_DELETE,
+        PermissionsList.ROLES_CREATE,
+        PermissionsList.ROLES_UPDATE,
+      ];
+      const forbiddenPermissions = await this.prisma.permission.findMany({
+        where: { code: { in: forbiddenCodes } },
+        select: { id: true },
+      });
+      const forbiddenIds = new Set(
+        forbiddenPermissions.map((perm) => perm.id),
+      );
+      permissionIds = permissionIds.filter((id) => !forbiddenIds.has(id));
     }
 
     await this.prisma.rolePermission.deleteMany({ where: { roleId } });
