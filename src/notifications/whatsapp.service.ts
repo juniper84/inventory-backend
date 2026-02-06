@@ -37,22 +37,8 @@ export class WhatsAppService {
     return trimmed.startsWith('whatsapp:') ? trimmed : `whatsapp:${trimmed}`;
   }
 
-  async sendMessage(params: { to: string; body: string }) {
-    if (!this.enabled) {
-      return { skipped: true };
-    }
-    const to = this.normalizeTo(params.to);
-    if (!to) {
-      return { skipped: true };
-    }
-    const normalizedTo = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+  private async sendPayload(payload: URLSearchParams) {
     const url = `https://api.twilio.com/2010-04-01/Accounts/${this.accountSid}/Messages.json`;
-    const payload = new URLSearchParams({
-      From: this.from,
-      To: normalizedTo,
-      Body: params.body,
-    });
-
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -73,5 +59,47 @@ export class WhatsAppService {
     }
 
     return response.json();
+  }
+
+  async sendMessage(params: { to: string; body: string }) {
+    if (!this.enabled) {
+      return { skipped: true };
+    }
+    const to = this.normalizeTo(params.to);
+    if (!to) {
+      return { skipped: true };
+    }
+    const normalizedTo = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+    const payload = new URLSearchParams({
+      From: this.from,
+      To: normalizedTo,
+      Body: params.body,
+    });
+
+    return this.sendPayload(payload);
+  }
+
+  async sendTemplate(params: {
+    to: string;
+    contentSid: string;
+    variables?: Record<string, string>;
+  }) {
+    if (!this.enabled) {
+      return { skipped: true };
+    }
+    const to = this.normalizeTo(params.to);
+    if (!to) {
+      return { skipped: true };
+    }
+    const normalizedTo = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+    const payload = new URLSearchParams({
+      From: this.from,
+      To: normalizedTo,
+      ContentSid: params.contentSid,
+    });
+    if (params.variables && Object.keys(params.variables).length) {
+      payload.set('ContentVariables', JSON.stringify(params.variables));
+    }
+    return this.sendPayload(payload);
   }
 }

@@ -1,0 +1,38 @@
+import { NotificationEventKey } from './notification-config';
+export type WhatsAppTemplateLocale = 'en' | 'sw';
+export const WHATSAPP_TEMPLATE_SIDS: Record<WhatsAppTemplateLocale, Partial<Record<NotificationEventKey, string>>> = {
+  en: {
+    lowStock: 'HXe0ed51bc17dceaa50f0ac712030df6c7',
+    pendingApprovals: 'HX8d0c1227a0c1592a333be2a880b63fe3',
+    offlineNearingLimit: 'HX5740b616902bd5ab5ffa848dc8b0e8e2',
+    creditOverdue: 'HXeecaddec7f535441e2a01c1da292ee5e',
+    graceWarnings: 'HXdc0bdb9b2ad4da077c8a2881fa34ac1b',
+    expiry: 'HXf353cc1f22dc8fa07ba827eeffae5fe0',
+    noteReminder: 'HXfc250f3b287cc9f8f956ba5cd5e36998',
+    saleDrafted: 'HX8a0d4381a3719e9f4deb9b25639bf0f2',
+    saleCompleted: 'HX60f986cab6ff3aa005969518bf64d307',
+    saleVoided: 'HX3bc0d1f6c83bb2f646c388eea5456edb',
+    saleRefunded: 'HX33acd8b017316b4f40f52eb47f6479cd',
+    transferCreated: 'HX56ab0cad1f9ceb1c512578c3f347ac9b',
+    transferInTransit: 'HX9ef113f8ce8aaff785c22afefcacad6d',
+    transferReceived: 'HXfb6bf2258a62e193212e4c9540fdb6e5',
+    transferCancelled: 'HX0376e79533fc6eada1ef074a9cd2b395',
+    stockAdjusted: 'HX1355f640385eaecc6ab444a56c34beef',
+    stockCountRecorded: 'HX429461f398d88668d1c42eb9cc1a07f3',
+    purchaseCreated: 'HXab05499174c79231144c3476c1b0f344',
+    purchaseOrderCreated: 'HX374bd44a98f04850f951b82170c4686d',
+    purchaseOrderApproved: 'HX4397ff8d1c6237f4a55217b284e5f8c0',
+    receivingRecorded: 'HX6e9290025c972b49c5f15496db04483c',
+    supplierReturnRecorded: 'HX239912ce380ab88b5b256b8d91713969',
+    expenseRecorded: 'HX7e8c6f2a36ed3b4e109c19e11707b117',
+    approvalApproved: 'HX487a85eda99a609ad0c980f02332a121',
+    approvalRejected: 'HX93786a9fea4fe239d7cc3977e40c1056',
+    accessRequest: 'HX33c75e4ecebe6e7aa5f590b656907440',
+    subscriptionRequestApproved: 'HX693bd9bac2a020798dea1f3f202eb000',
+    subscriptionRequestRejected: 'HX3cfced3c0ca73ebabd4b78e8497a9175',
+    securityRefreshTokenReuse: 'HX873289b88cafd5efd20857be6241b463',
+    securityUnusualLogin: 'HX0423f53f6a2857cfb2a94ff6a1b5ce74',
+  },
+  sw: {
+  },
+};

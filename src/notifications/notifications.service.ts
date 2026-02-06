@@ -13,6 +13,10 @@ import {
 } from './notification-config';
 import { WhatsAppService } from './whatsapp.service';
 import { SmsService } from './sms.service';
+import {
+  WHATSAPP_TEMPLATE_SIDS,
+  WhatsAppTemplateLocale,
+} from './whatsapp-templates';
 import { labelWithFallback } from '../common/labels';
 import { resolveResourceName } from '../common/resource-labels';
 import {
@@ -413,6 +417,7 @@ export class NotificationsService {
         user: {
           select: {
             id: true,
+            name: true,
             email: true,
             phone: true,
             notificationPreferences: true,
@@ -654,6 +659,16 @@ export class NotificationsService {
     return combined;
   }
 
+  private resolveWhatsappTemplate(
+    eventKey: NotificationEventKey,
+    locale: WhatsAppTemplateLocale,
+  ) {
+    return (
+      WHATSAPP_TEMPLATE_SIDS[locale]?.[eventKey] ??
+      WHATSAPP_TEMPLATE_SIDS.en?.[eventKey]
+    );
+  }
+
   async notifyEvent(data: {
     businessId: string;
     eventKey: NotificationEventKey;
@@ -832,10 +847,23 @@ export class NotificationsService {
         this.allowUserChannel(preferences, 'whatsapp')
       ) {
         try {
-          await this.whatsappService.sendMessage({
-            to: membership.user.phone,
-            body: `${data.title}\n${enriched.message}`.trim(),
-          });
+          const locale: WhatsAppTemplateLocale = 'en';
+          const templateSid = this.resolveWhatsappTemplate(
+            data.eventKey,
+            locale,
+          );
+          if (templateSid) {
+            await this.whatsappService.sendTemplate({
+              to: membership.user.phone,
+              contentSid: templateSid,
+              variables: { '1': membership.user.name || 'there' },
+            });
+          } else {
+            await this.whatsappService.sendMessage({
+              to: membership.user.phone,
+              body: `${data.title}\n${enriched.message}`.trim(),
+            });
+          }
         } catch {
           // WhatsApp delivery failures should not block notification creation.
         }
@@ -853,6 +881,7 @@ export class NotificationsService {
     roleId?: string;
     branchId?: string;
     permission?: string;
+    eventKey?: NotificationEventKey;
     title: string;
     message: string;
     priority: 'ACTION_REQUIRED' | 'WARNING' | 'INFO' | 'SECURITY';
@@ -942,10 +971,22 @@ export class NotificationsService {
       this.allowUserChannel(preferences, 'whatsapp')
     ) {
       try {
-        await this.whatsappService.sendMessage({
-          to: user.phone,
-          body: `${data.title}\n${enriched.message}`.trim(),
-        });
+        const locale: WhatsAppTemplateLocale = 'en';
+        const templateSid = data.eventKey
+          ? this.resolveWhatsappTemplate(data.eventKey, locale)
+          : undefined;
+        if (templateSid) {
+          await this.whatsappService.sendTemplate({
+            to: user.phone,
+            contentSid: templateSid,
+            variables: { '1': user.name || 'there' },
+          });
+        } else {
+          await this.whatsappService.sendMessage({
+            to: user.phone,
+            body: `${data.title}\n${enriched.message}`.trim(),
+          });
+        }
       } catch {
         // WhatsApp delivery failures should not block notification creation.
       }
