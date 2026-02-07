@@ -106,8 +106,11 @@ describe('RBAC role-matrix (e2e)', () => {
       .expect(201);
     branchB = branchBRes.body.id;
 
-    const permissionRes = await authReq(adminToken, 'get', '/roles/permissions')
-      .expect(200);
+    const permissionRes = await authReq(
+      adminToken,
+      'get',
+      '/roles/permissions',
+    ).expect(200);
     const list = permissionRes.body as Permission[];
     permissions = new Map(list.map((perm) => [perm.code, perm.id]));
   });
@@ -154,26 +157,23 @@ describe('RBAC role-matrix (e2e)', () => {
       stockReader.token,
       'get',
       `/stock?limit=1&branchId=${branchA}`,
-    )
-      .expect(200);
+    ).expect(200);
     await authReq(
       stockReader.token,
       'get',
       `/stock?limit=1&branchId=${branchB}`,
-    )
-      .expect(expectForbidden);
+    ).expect(expectForbidden);
 
-    await authReq(cashier.token, 'get', '/sales/receipts?limit=1')
-      .expect(200);
-    await authReq(cashier.token, 'get', '/users?limit=1')
-      .expect(expectForbidden);
+    await authReq(cashier.token, 'get', '/sales/receipts?limit=1').expect(200);
+    await authReq(cashier.token, 'get', '/users?limit=1').expect(
+      expectForbidden,
+    );
 
-    await authReq(usersReader.token, 'get', '/users?limit=1')
-      .expect(200);
-    await authReq(usersReader.token, 'get', '/stock?limit=1')
-      .expect(expectForbidden);
+    await authReq(usersReader.token, 'get', '/users?limit=1').expect(200);
+    await authReq(usersReader.token, 'get', '/stock?limit=1').expect(
+      expectForbidden,
+    );
 
-    await authReq(noPerm.token, 'get', '/settings')
-      .expect(expectForbidden);
+    await authReq(noPerm.token, 'get', '/settings').expect(expectForbidden);
   });
 });

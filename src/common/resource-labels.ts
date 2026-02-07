@@ -869,7 +869,7 @@ export async function resolveResourceNames(
       const targetId = approval.targetId?.trim();
       const targetLabel =
         target && targetId
-          ? targetLabelMap.get(`${target}:${targetId}`) ?? null
+          ? (targetLabelMap.get(`${target}:${targetId}`) ?? null)
           : null;
       const label = targetLabel
         ? `${approval.actionType} ${targetLabel}`

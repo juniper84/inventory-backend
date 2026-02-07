@@ -28,13 +28,10 @@ export class SubscriptionReminderService
     const intervalMs = Math.max(hours, 1) * 60 * 60 * 1000;
     this.runGraceReminderSweep();
     this.runExpirySweep();
-    this.intervalId = setInterval(
-      () => {
-        this.runGraceReminderSweep();
-        this.runExpirySweep();
-      },
-      intervalMs,
-    );
+    this.intervalId = setInterval(() => {
+      this.runGraceReminderSweep();
+      this.runExpirySweep();
+    }, intervalMs);
   }
 
   onModuleDestroy() {
@@ -137,7 +134,13 @@ export class SubscriptionReminderService
     const now = new Date();
     const candidates = await this.prisma.subscription.findMany({
       where: {
-        status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.GRACE, SubscriptionStatus.TRIAL] },
+        status: {
+          in: [
+            SubscriptionStatus.ACTIVE,
+            SubscriptionStatus.GRACE,
+            SubscriptionStatus.TRIAL,
+          ],
+        },
         expiresAt: { not: null, lte: now },
       },
       include: { business: { select: { name: true } } },
@@ -158,7 +161,10 @@ export class SubscriptionReminderService
         });
 
         await this.prisma.businessSettings.updateMany({
-          where: { businessId: subscription.businessId, readOnlyEnabled: false },
+          where: {
+            businessId: subscription.businessId,
+            readOnlyEnabled: false,
+          },
           data: {
             readOnlyEnabled: true,
             readOnlyReason: 'Subscription expired.',

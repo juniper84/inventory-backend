@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RbacService } from '../rbac/rbac.service';
 
 @Injectable()
 export class AccessRequestsService {
@@ -9,6 +10,7 @@ export class AccessRequestsService {
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
     private readonly auditService: AuditService,
+    private readonly rbacService: RbacService,
   ) {}
 
   async createRequest(params: {
@@ -18,6 +20,25 @@ export class AccessRequestsService {
     path: string;
     reason?: string | null;
   }) {
+    const requestedPermission = params.permission.trim();
+    if (!requestedPermission) {
+      throw new BadRequestException('permission is required.');
+    }
+    const permission = await this.prisma.permission.findUnique({
+      where: { code: requestedPermission },
+      select: { id: true, code: true },
+    });
+    if (!permission) {
+      throw new BadRequestException('Unknown permission.');
+    }
+    const access = await this.rbacService.resolveUserAccess(
+      params.userId,
+      params.businessId,
+    );
+    if (access.permissions.includes(requestedPermission)) {
+      throw new BadRequestException('User already has this permission.');
+    }
+
     const user = await this.prisma.user.findFirst({
       where: {
         id: params.userId,
@@ -28,7 +49,7 @@ export class AccessRequestsService {
     const requester = user?.name || user?.email || user?.id || 'Unknown user';
     const reason = params.reason?.trim();
     const messageLines = [
-      `${requester} requested access to ${params.permission}.`,
+      `${requester} requested access to ${requestedPermission}.`,
       params.path ? `Path: ${params.path}` : null,
       reason ? `Reason: ${reason}` : null,
     ].filter(Boolean);
@@ -41,7 +62,7 @@ export class AccessRequestsService {
       message,
       priority: 'ACTION_REQUIRED',
       metadata: {
-        requestedPermission: params.permission,
+        requestedPermission,
         requestedPath: params.path,
         requestedBy: params.userId,
         reason: reason ?? null,
@@ -58,7 +79,7 @@ export class AccessRequestsService {
       outcome: 'SUCCESS',
       reason: reason ?? undefined,
       metadata: {
-        permission: params.permission,
+        permission: requestedPermission,
         path: params.path,
       },
     });

@@ -220,8 +220,12 @@ export class NotesService {
       ...(search
         ? {
             OR: [
-              { title: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { body: { contains: search, mode: Prisma.QueryMode.insensitive } },
+              {
+                title: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
+              {
+                body: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
             ],
           }
         : {}),
@@ -507,39 +511,38 @@ export class NotesService {
         { recipientId: context.userId },
       ];
     }
-    const [upcoming, overdue, upcomingCount, overdueCount] =
-      await Promise.all([
-        this.prisma.noteReminder.findMany({
-          where: {
-            ...baseWhere,
-            scheduledAt: { gte: now, lte: upcomingEnd },
-          },
-          orderBy: { scheduledAt: 'asc' },
-          take,
-          include: {
-            note: { select: { id: true, title: true } },
-            branch: { select: { id: true, name: true } },
-          },
-        }),
-        this.prisma.noteReminder.findMany({
-          where: { ...baseWhere, scheduledAt: { lt: now } },
-          orderBy: { scheduledAt: 'desc' },
-          take,
-          include: {
-            note: { select: { id: true, title: true } },
-            branch: { select: { id: true, name: true } },
-          },
-        }),
-        this.prisma.noteReminder.count({
-          where: {
-            ...baseWhere,
-            scheduledAt: { gte: now, lte: upcomingEnd },
-          },
-        }),
-        this.prisma.noteReminder.count({
-          where: { ...baseWhere, scheduledAt: { lt: now } },
-        }),
-      ]);
+    const [upcoming, overdue, upcomingCount, overdueCount] = await Promise.all([
+      this.prisma.noteReminder.findMany({
+        where: {
+          ...baseWhere,
+          scheduledAt: { gte: now, lte: upcomingEnd },
+        },
+        orderBy: { scheduledAt: 'asc' },
+        take,
+        include: {
+          note: { select: { id: true, title: true } },
+          branch: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.noteReminder.findMany({
+        where: { ...baseWhere, scheduledAt: { lt: now } },
+        orderBy: { scheduledAt: 'desc' },
+        take,
+        include: {
+          note: { select: { id: true, title: true } },
+          branch: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.noteReminder.count({
+        where: {
+          ...baseWhere,
+          scheduledAt: { gte: now, lte: upcomingEnd },
+        },
+      }),
+      this.prisma.noteReminder.count({
+        where: { ...baseWhere, scheduledAt: { lt: now } },
+      }),
+    ]);
 
     return {
       upcoming: { count: upcomingCount, items: upcoming },
@@ -656,7 +659,11 @@ export class NotesService {
             OR: [
               { name: { contains: q, mode: Prisma.QueryMode.insensitive } },
               { sku: { contains: q, mode: Prisma.QueryMode.insensitive } },
-              { product: { name: { contains: q, mode: Prisma.QueryMode.insensitive } } },
+              {
+                product: {
+                  name: { contains: q, mode: Prisma.QueryMode.insensitive },
+                },
+              },
             ],
           },
           select: { id: true, name: true, product: { select: { name: true } } },

@@ -1,7 +1,12 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
-import { API_PREFIX, createTestApp, expectClientError, signupAndLogin } from './e2e-utils';
+import {
+  API_PREFIX,
+  createTestApp,
+  expectClientError,
+  signupAndLogin,
+} from './e2e-utils';
 
 jest.setTimeout(30000);
 

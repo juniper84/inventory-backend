@@ -98,7 +98,9 @@ export class NotificationsController {
 
   @Get('announcement')
   getAnnouncement(@Req() req: { user?: { businessId: string } }) {
-    return this.notificationsService.getActiveAnnouncement(req.user?.businessId);
+    return this.notificationsService.getActiveAnnouncement(
+      req.user?.businessId,
+    );
   }
 
   @Sse('stream')

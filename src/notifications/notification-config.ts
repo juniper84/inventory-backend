@@ -47,7 +47,11 @@ export const NOTIFICATION_GROUPS: Record<
   NotificationGroupKey,
   NotificationEventKey[]
 > = {
-  security: ['securityRefreshTokenReuse', 'securityUnusualLogin', 'accessRequest'],
+  security: [
+    'securityRefreshTokenReuse',
+    'securityUnusualLogin',
+    'accessRequest',
+  ],
   approvals: [
     'pendingApprovals',
     'approvalApproved',
@@ -63,8 +67,19 @@ export const NOTIFICATION_GROUPS: Record<
     'receivingRecorded',
     'supplierReturnRecorded',
   ],
-  sales: ['saleDrafted', 'saleCompleted', 'saleVoided', 'saleRefunded', 'creditOverdue'],
-  purchases: ['purchaseCreated', 'purchaseOrderCreated', 'purchaseOrderApproved', 'expenseRecorded'],
+  sales: [
+    'saleDrafted',
+    'saleCompleted',
+    'saleVoided',
+    'saleRefunded',
+    'creditOverdue',
+  ],
+  purchases: [
+    'purchaseCreated',
+    'purchaseOrderCreated',
+    'purchaseOrderApproved',
+    'expenseRecorded',
+  ],
   transfers: [
     'transferCreated',
     'transferInTransit',
@@ -316,7 +331,9 @@ export const normalizeNotificationSettings = (
     const groupsSource = hasGroups
       ? (input.groups as Record<string, unknown>)
       : {};
-    const groups = (Object.keys(NOTIFICATION_GROUPS) as NotificationGroupKey[]).reduce(
+    const groups = (
+      Object.keys(NOTIFICATION_GROUPS) as NotificationGroupKey[]
+    ).reduce(
       (acc, key) => {
         const groupInput =
           groupsSource && typeof groupsSource[key] === 'object'
@@ -364,7 +381,9 @@ export const normalizeNotificationSettings = (
     mergedRecipients = mergeRecipients(mergedRecipients, recipients);
   }
 
-  const groups = (Object.keys(NOTIFICATION_GROUPS) as NotificationGroupKey[]).reduce(
+  const groups = (
+    Object.keys(NOTIFICATION_GROUPS) as NotificationGroupKey[]
+  ).reduce(
     (acc, groupKey) => {
       const groupEvents = NOTIFICATION_GROUPS[groupKey];
       const channelAggregate = {
@@ -381,7 +400,10 @@ export const normalizeNotificationSettings = (
           | Record<string, unknown>
           | null
           | undefined;
-        channelAggregate.email ||= toBoolean(channelsInput?.email, channels.email);
+        channelAggregate.email ||= toBoolean(
+          channelsInput?.email,
+          channels.email,
+        );
         channelAggregate.sms ||= toBoolean(channelsInput?.sms, channels.sms);
         channelAggregate.whatsapp ||= toBoolean(
           channelsInput?.whatsapp,

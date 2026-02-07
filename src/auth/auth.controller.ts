@@ -89,9 +89,7 @@ export class AuthController {
 
   @Post('password-reset/request')
   @Public()
-  async requestReset(
-    @Body() body: { email: string; businessId?: string },
-  ) {
+  async requestReset(@Body() body: { email: string; businessId?: string }) {
     return this.authService.requestPasswordResetByEmail(
       body.email,
       body.businessId,

@@ -24,7 +24,9 @@ export class PriceListsService {
     const where: Prisma.PriceListWhereInput = {
       businessId,
       ...(query.status ? { status: query.status as any } : {}),
-      ...(search ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } } : {}),
+      ...(search
+        ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } }
+        : {}),
     };
     const items = await this.prisma.priceList.findMany({
       where,

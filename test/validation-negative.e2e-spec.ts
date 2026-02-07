@@ -33,15 +33,11 @@ describe('Validation negative cases (e2e)', () => {
       .set('authorization', `Bearer ${token}`);
 
   it('rejects branch creation without name', async () => {
-    await authReq('post', '/branches')
-      .send({})
-      .expect(expectClientError);
+    await authReq('post', '/branches').send({}).expect(expectClientError);
   });
 
   it('rejects category creation without name', async () => {
-    await authReq('post', '/categories')
-      .send({})
-      .expect(expectClientError);
+    await authReq('post', '/categories').send({}).expect(expectClientError);
   });
 
   it('rejects product creation without categoryId', async () => {
@@ -123,9 +119,7 @@ describe('Validation negative cases (e2e)', () => {
   });
 
   it('rejects price list without name', async () => {
-    await authReq('post', '/price-lists')
-      .send({})
-      .expect(expectClientError);
+    await authReq('post', '/price-lists').send({}).expect(expectClientError);
   });
 
   it('rejects sales draft without items', async () => {
@@ -153,9 +147,7 @@ describe('Validation negative cases (e2e)', () => {
   });
 
   it('rejects import apply without dataset', async () => {
-    await authReq('post', '/imports/apply')
-      .send({})
-      .expect(expectClientError);
+    await authReq('post', '/imports/apply').send({}).expect(expectClientError);
   });
 
   it('rejects access request without reason', async () => {

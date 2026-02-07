@@ -79,10 +79,7 @@ export class PurchasesService {
     const branchScopeFilter =
       Object.keys(branchFilter).length > 0
         ? {
-            OR: [
-              { purchase: branchFilter },
-              { purchaseOrder: branchFilter },
-            ],
+            OR: [{ purchase: branchFilter }, { purchaseOrder: branchFilter }],
           }
         : null;
     const where = {
@@ -94,8 +91,22 @@ export class PurchasesService {
         ? {
             OR: [
               { id: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { supplier: { name: { contains: search, mode: Prisma.QueryMode.insensitive } } },
-              { branch: { name: { contains: search, mode: Prisma.QueryMode.insensitive } } },
+              {
+                supplier: {
+                  name: {
+                    contains: search,
+                    mode: Prisma.QueryMode.insensitive,
+                  },
+                },
+              },
+              {
+                branch: {
+                  name: {
+                    contains: search,
+                    mode: Prisma.QueryMode.insensitive,
+                  },
+                },
+              },
             ],
           }
         : {}),
@@ -162,8 +173,22 @@ export class PurchasesService {
         ? {
             OR: [
               { id: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { supplier: { name: { contains: search, mode: Prisma.QueryMode.insensitive } } },
-              { branch: { name: { contains: search, mode: Prisma.QueryMode.insensitive } } },
+              {
+                supplier: {
+                  name: {
+                    contains: search,
+                    mode: Prisma.QueryMode.insensitive,
+                  },
+                },
+              },
+              {
+                branch: {
+                  name: {
+                    contains: search,
+                    mode: Prisma.QueryMode.insensitive,
+                  },
+                },
+              },
             ],
           }
         : {}),
@@ -226,10 +251,7 @@ export class PurchasesService {
     const branchScopeFilter =
       Object.keys(branchFilter).length > 0
         ? {
-            OR: [
-              { purchase: branchFilter },
-              { purchaseOrder: branchFilter },
-            ],
+            OR: [{ purchase: branchFilter }, { purchaseOrder: branchFilter }],
           }
         : null;
     const where = {
@@ -254,10 +276,7 @@ export class PurchasesService {
         ...(status
           ? [
               {
-                OR: [
-                  { purchase: { status } },
-                  { purchaseOrder: { status } },
-                ],
+                OR: [{ purchase: { status } }, { purchaseOrder: { status } }],
               },
             ]
           : []),
@@ -265,29 +284,65 @@ export class PurchasesService {
           ? [
               {
                 OR: [
-                  { id: { contains: search, mode: Prisma.QueryMode.insensitive } },
-                  { purchaseId: { contains: search, mode: Prisma.QueryMode.insensitive } },
                   {
-                    purchaseOrderId: { contains: search, mode: Prisma.QueryMode.insensitive },
+                    id: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
                   },
                   {
-                    variant: { name: { contains: search, mode: Prisma.QueryMode.insensitive } },
+                    purchaseId: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
                   },
                   {
-                    variant: { sku: { contains: search, mode: Prisma.QueryMode.insensitive } },
+                    purchaseOrderId: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
                   },
-                  { batch: { code: { contains: search, mode: Prisma.QueryMode.insensitive } } },
+                  {
+                    variant: {
+                      name: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                  },
+                  {
+                    variant: {
+                      sku: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                  },
+                  {
+                    batch: {
+                      code: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                  },
                   {
                     purchase: {
                       supplier: {
-                        name: { contains: search, mode: Prisma.QueryMode.insensitive },
+                        name: {
+                          contains: search,
+                          mode: Prisma.QueryMode.insensitive,
+                        },
                       },
                     },
                   },
                   {
                     purchaseOrder: {
                       supplier: {
-                        name: { contains: search, mode: Prisma.QueryMode.insensitive },
+                        name: {
+                          contains: search,
+                          mode: Prisma.QueryMode.insensitive,
+                        },
                       },
                     },
                   },
@@ -357,13 +412,28 @@ export class PurchasesService {
           ...(search
             ? {
                 OR: [
-                  { id: { contains: search, mode: Prisma.QueryMode.insensitive } },
                   {
-                    supplier: {
-                      name: { contains: search, mode: Prisma.QueryMode.insensitive },
+                    id: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
                     },
                   },
-                  { branch: { name: { contains: search, mode: Prisma.QueryMode.insensitive } } },
+                  {
+                    supplier: {
+                      name: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                  },
+                  {
+                    branch: {
+                      name: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                  },
                 ],
               }
             : {}),

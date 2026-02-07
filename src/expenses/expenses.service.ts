@@ -84,9 +84,23 @@ export class ExpensesService {
       ...(search
         ? {
             OR: [
-              { note: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { receiptRef: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { branch: { name: { contains: search, mode: Prisma.QueryMode.insensitive } } },
+              {
+                note: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
+              {
+                receiptRef: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+              {
+                branch: {
+                  name: {
+                    contains: search,
+                    mode: Prisma.QueryMode.insensitive,
+                  },
+                },
+              },
             ],
           }
         : {}),

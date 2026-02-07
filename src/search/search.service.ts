@@ -51,7 +51,11 @@ export class SearchService {
             OR: [
               { name: { contains: q, mode: Prisma.QueryMode.insensitive } },
               { sku: { contains: q, mode: Prisma.QueryMode.insensitive } },
-              { product: { name: { contains: q, mode: Prisma.QueryMode.insensitive } } },
+              {
+                product: {
+                  name: { contains: q, mode: Prisma.QueryMode.insensitive },
+                },
+              },
             ],
           },
           include: {

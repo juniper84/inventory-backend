@@ -33,7 +33,9 @@ export class CatalogService {
       where: {
         businessId,
         ...(query.status ? { status: query.status as any } : {}),
-        ...(search ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } } : {}),
+        ...(search
+          ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } }
+          : {}),
       },
       orderBy: { createdAt: 'desc' },
       ...pagination,
@@ -120,7 +122,9 @@ export class CatalogService {
       businessId,
       ...(query.status ? { status: query.status as any } : {}),
       ...(query.categoryId ? { categoryId: query.categoryId } : {}),
-      ...(search ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } } : {}),
+      ...(search
+        ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } }
+        : {}),
       ...(hasVariants === 'yes'
         ? { variants: { some: {} } }
         : hasVariants === 'no'
@@ -270,14 +274,28 @@ export class CatalogService {
       ...(search
         ? {
             OR: [
-              { name: { contains: search, mode: Prisma.QueryMode.insensitive } },
+              {
+                name: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
               { sku: { contains: search, mode: Prisma.QueryMode.insensitive } },
               {
                 barcodes: {
-                  some: { code: { contains: search, mode: Prisma.QueryMode.insensitive } },
+                  some: {
+                    code: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
                 },
               },
-              { product: { name: { contains: search, mode: Prisma.QueryMode.insensitive } } },
+              {
+                product: {
+                  name: {
+                    contains: search,
+                    mode: Prisma.QueryMode.insensitive,
+                  },
+                },
+              },
             ],
           }
         : {}),

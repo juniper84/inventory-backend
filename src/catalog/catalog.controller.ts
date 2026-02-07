@@ -22,7 +22,12 @@ export class CatalogController {
   listCategories(
     @Req() req: { user?: { businessId: string } },
     @Query()
-    query: { limit?: string; cursor?: string; search?: string; status?: string },
+    query: {
+      limit?: string;
+      cursor?: string;
+      search?: string;
+      status?: string;
+    },
   ) {
     return this.catalogService.listCategories(
       req.user?.businessId || '',

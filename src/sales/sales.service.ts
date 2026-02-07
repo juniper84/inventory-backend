@@ -918,7 +918,9 @@ export class SalesService {
       (sum, payment) => sum + payment.amount,
       0,
     );
-    const hasCashPayment = payments.some((payment) => payment.method === 'CASH');
+    const hasCashPayment = payments.some(
+      (payment) => payment.method === 'CASH',
+    );
     const creditEnabled = posPolicies.creditEnabled ?? false;
     const creditRequested = paymentsTotal < Number(sale.total) - 0.01;
     if (creditRequested && !creditEnabled) {
@@ -1179,7 +1181,10 @@ export class SalesService {
         snapshotAuditEvents = attemptSnapshotEvents;
         break;
       } catch (error) {
-        if (isReceiptNumberConflict(error) && attempt < RECEIPT_RETRY_LIMIT - 1) {
+        if (
+          isReceiptNumberConflict(error) &&
+          attempt < RECEIPT_RETRY_LIMIT - 1
+        ) {
           continue;
         }
         throw error;
@@ -1793,11 +1798,25 @@ export class SalesService {
       ...(search
         ? {
             OR: [
-              { receiptNumber: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { sale: { id: { contains: search, mode: Prisma.QueryMode.insensitive } } },
+              {
+                receiptNumber: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
               {
                 sale: {
-                  customer: { name: { contains: search, mode: Prisma.QueryMode.insensitive } },
+                  id: { contains: search, mode: Prisma.QueryMode.insensitive },
+                },
+              },
+              {
+                sale: {
+                  customer: {
+                    name: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
                 },
               },
               {

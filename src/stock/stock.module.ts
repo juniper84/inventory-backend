@@ -6,7 +6,11 @@ import { StockController } from './stock.controller';
 import { StockService } from './stock.service';
 
 @Module({
-  imports: [forwardRef(() => ApprovalsModule), NotificationsModule, UnitsModule],
+  imports: [
+    forwardRef(() => ApprovalsModule),
+    NotificationsModule,
+    UnitsModule,
+  ],
   controllers: [StockController],
   providers: [StockService],
   exports: [StockService],

@@ -18,7 +18,9 @@ export class MailerService {
   constructor(private readonly configService: ConfigService) {
     const region = this.configService.get<string>('ses.region');
     const accessKeyId = this.configService.get<string>('ses.accessKeyId');
-    const secretAccessKey = this.configService.get<string>('ses.secretAccessKey');
+    const secretAccessKey = this.configService.get<string>(
+      'ses.secretAccessKey',
+    );
     const from = this.configService.get<string>('ses.from');
 
     this.logger.log(
@@ -39,9 +41,7 @@ export class MailerService {
       return { skipped: true };
     }
 
-    this.logger.log(
-      `Sending email: from=${this.fromAddress} to=${payload.to}`,
-    );
+    this.logger.log(`Sending email: from=${this.fromAddress} to=${payload.to}`);
 
     const command = new SendEmailCommand({
       Source: this.fromAddress,

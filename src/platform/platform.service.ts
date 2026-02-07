@@ -11,7 +11,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationStreamService } from '../notifications/notification-stream.service';
-import { hashPassword, validatePassword, verifyPassword } from '../auth/password';
+import {
+  hashPassword,
+  validatePassword,
+  verifyPassword,
+} from '../auth/password';
 import {
   BusinessStatus,
   ExportJobStatus,
@@ -151,8 +155,18 @@ export class PlatformService {
           ...(search
             ? {
                 OR: [
-                  { name: { contains: search, mode: Prisma.QueryMode.insensitive } },
-                  { id: { contains: search, mode: Prisma.QueryMode.insensitive } },
+                  {
+                    name: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
+                  {
+                    id: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
                 ],
               }
             : {}),
@@ -341,7 +355,9 @@ export class PlatformService {
     }
     if (!dryRun) {
       if (confirmBusinessId !== businessId) {
-        throw new BadRequestException('Business ID confirmation does not match.');
+        throw new BadRequestException(
+          'Business ID confirmation does not match.',
+        );
       }
       if (confirmText !== 'DELETE') {
         throw new BadRequestException('Confirmation text does not match.');
@@ -1302,7 +1318,9 @@ export class PlatformService {
     );
     const startsAt = data.startsAt ?? new Date();
     const endsAt =
-      data.endsAt === undefined ? new Date(startsAt.getTime() + 24 * 60 * 60 * 1000) : data.endsAt;
+      data.endsAt === undefined
+        ? new Date(startsAt.getTime() + 24 * 60 * 60 * 1000)
+        : data.endsAt;
     const announcement = await this.prisma.platformAnnouncement.create({
       data: {
         title: data.title,
@@ -1371,7 +1389,10 @@ export class PlatformService {
     });
   }
 
-  async endAnnouncement(data: { announcementId: string; platformAdminId: string }) {
+  async endAnnouncement(data: {
+    announcementId: string;
+    platformAdminId: string;
+  }) {
     const announcement = await this.prisma.platformAnnouncement.update({
       where: { id: data.announcementId },
       data: { endsAt: new Date() },

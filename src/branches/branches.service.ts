@@ -31,9 +31,18 @@ export class BranchesService {
       ...(search
         ? {
             OR: [
-              { name: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { address: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { phone: { contains: search, mode: Prisma.QueryMode.insensitive } },
+              {
+                name: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
+              {
+                address: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+              {
+                phone: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
             ],
           }
         : {}),

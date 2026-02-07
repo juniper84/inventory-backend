@@ -129,7 +129,8 @@ export class BusinessService {
     if (
       (typeof discountThresholdPercent === 'number' &&
         discountThresholdPercent > 0) ||
-      (typeof discountThresholdAmount === 'number' && discountThresholdAmount > 0)
+      (typeof discountThresholdAmount === 'number' &&
+        discountThresholdAmount > 0)
     ) {
       approvalPolicies.push({
         businessId: business.id,
@@ -143,7 +144,7 @@ export class BusinessService {
           typeof discountThresholdPercent === 'number' &&
           discountThresholdPercent > 0
             ? discountThresholdPercent
-            : discountThresholdAmount ?? null,
+            : (discountThresholdAmount ?? null),
         requiredRoleIds: [],
         allowSelfApprove: false,
       });

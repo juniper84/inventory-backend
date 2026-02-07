@@ -58,7 +58,9 @@ export class RolesService {
     const permissionCount = query.permissionCount?.toLowerCase();
     const where: Prisma.RoleWhereInput = {
       businessId,
-      ...(search ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } } : {}),
+      ...(search
+        ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } }
+        : {}),
       ...(scope === 'system'
         ? { isSystem: true }
         : scope === 'custom'
@@ -166,9 +168,7 @@ export class RolesService {
         where: { code: { in: forbiddenCodes } },
         select: { id: true },
       });
-      const forbiddenIds = new Set(
-        forbiddenPermissions.map((perm) => perm.id),
-      );
+      const forbiddenIds = new Set(forbiddenPermissions.map((perm) => perm.id));
       permissionIds = permissionIds.filter((id) => !forbiddenIds.has(id));
     }
 

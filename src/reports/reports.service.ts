@@ -106,7 +106,9 @@ export class ReportsService {
         ...branchFilter,
       },
       include: {
-        variant: { select: { name: true, product: { select: { name: true } } } },
+        variant: {
+          select: { name: true, product: { select: { name: true } } },
+        },
         branch: { select: { name: true } },
       },
     });
@@ -399,7 +401,10 @@ export class ReportsService {
 
     byDayMap.forEach((bucket) => {
       bucket.netProfit =
-        bucket.grossProfit - bucket.losses - bucket.expenses - bucket.transferFees;
+        bucket.grossProfit -
+        bucket.losses -
+        bucket.expenses -
+        bucket.transferFees;
     });
 
     const losses = Number(lossTotals._sum.totalCost ?? 0);
@@ -454,6 +459,7 @@ export class ReportsService {
       },
       _sum: { total: true },
       _count: { id: true },
+      orderBy: { _sum: { total: 'desc' } },
     });
     const customerIds = data
       .map((row) => row.customerId)
@@ -907,11 +913,11 @@ export class ReportsService {
   ) {
     const days = Number(filters?.days ?? 30);
     const limit = Number(filters?.limit ?? 5);
-    const safeDays = Number.isFinite(days) ? Math.max(1, Math.min(days, 90)) : 30;
+    const safeDays = Number.isFinite(days)
+      ? Math.max(1, Math.min(days, 90))
+      : 30;
     const take = Number.isFinite(limit) ? Math.max(1, Math.min(limit, 10)) : 5;
-    const startDate = new Date(
-      Date.now() - safeDays * 24 * 60 * 60 * 1000,
-    );
+    const startDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
     const branchFilter = this.resolveBranchScope(
       branchScope,
       filters?.branchId,
@@ -938,7 +944,9 @@ export class ReportsService {
         product: { select: { name: true } },
       },
     });
-    const variantLookup = new Map(variants.map((variant) => [variant.id, variant]));
+    const variantLookup = new Map(
+      variants.map((variant) => [variant.id, variant]),
+    );
     await this.auditService.logEvent({
       businessId,
       userId,
@@ -971,10 +979,14 @@ export class ReportsService {
     }
     const filter: { gte?: Date; lte?: Date } = {};
     if (start) {
-      filter.gte = new Date(start);
+      const startDate = new Date(start);
+      startDate.setHours(0, 0, 0, 0);
+      filter.gte = startDate;
     }
     if (end) {
-      filter.lte = new Date(end);
+      const endDate = new Date(end);
+      endDate.setHours(23, 59, 59, 999);
+      filter.lte = endDate;
     }
     return filter;
   }

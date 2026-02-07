@@ -32,7 +32,9 @@ type StreamEvent = {
 };
 
 @Injectable()
-export class NotificationStreamService implements OnModuleInit, OnModuleDestroy {
+export class NotificationStreamService
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(NotificationStreamService.name);
   private readonly notificationSubject = new Subject<Notification>();
   private readonly announcementSubject = new Subject<unknown>();
@@ -210,7 +212,7 @@ export class NotificationStreamService implements OnModuleInit, OnModuleDestroy 
     this.logger.warn(
       `Redis ${channel} error: ${
         error instanceof Error ? error.message : String(error)
-      } (throttled)`
+      } (throttled)`,
     );
   }
 }

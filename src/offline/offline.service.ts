@@ -192,34 +192,40 @@ export class OfflineService {
       Date.now() - staleThresholdHours * 60 * 60 * 1000,
     );
 
-    const [activeDevices, staleDevices, expiredDevices, pendingActions, failedActions, conflictActions] =
-      await Promise.all([
-        this.prisma.offlineDevice.count({
-          where: { businessId, status: OfflineDeviceStatus.ACTIVE },
-        }),
-        this.prisma.offlineDevice.count({
-          where: {
-            businessId,
-            status: OfflineDeviceStatus.ACTIVE,
-            OR: [
-              { lastSeenAt: { lte: staleCutoff } },
-              { lastSeenAt: null, createdAt: { lte: staleCutoff } },
-            ],
-          },
-        }),
-        this.prisma.offlineDevice.count({
-          where: { businessId, status: OfflineDeviceStatus.EXPIRED },
-        }),
-        this.prisma.offlineAction.count({
-          where: { businessId, status: OfflineActionStatus.PENDING },
-        }),
-        this.prisma.offlineAction.count({
-          where: { businessId, status: OfflineActionStatus.FAILED },
-        }),
-        this.prisma.offlineAction.count({
-          where: { businessId, status: OfflineActionStatus.CONFLICT },
-        }),
-      ]);
+    const [
+      activeDevices,
+      staleDevices,
+      expiredDevices,
+      pendingActions,
+      failedActions,
+      conflictActions,
+    ] = await Promise.all([
+      this.prisma.offlineDevice.count({
+        where: { businessId, status: OfflineDeviceStatus.ACTIVE },
+      }),
+      this.prisma.offlineDevice.count({
+        where: {
+          businessId,
+          status: OfflineDeviceStatus.ACTIVE,
+          OR: [
+            { lastSeenAt: { lte: staleCutoff } },
+            { lastSeenAt: null, createdAt: { lte: staleCutoff } },
+          ],
+        },
+      }),
+      this.prisma.offlineDevice.count({
+        where: { businessId, status: OfflineDeviceStatus.EXPIRED },
+      }),
+      this.prisma.offlineAction.count({
+        where: { businessId, status: OfflineActionStatus.PENDING },
+      }),
+      this.prisma.offlineAction.count({
+        where: { businessId, status: OfflineActionStatus.FAILED },
+      }),
+      this.prisma.offlineAction.count({
+        where: { businessId, status: OfflineActionStatus.CONFLICT },
+      }),
+    ]);
 
     let riskScore = 0;
     if (expiredDevices > 0) {
@@ -418,8 +424,13 @@ export class OfflineService {
       errorMessage?: string | null;
     };
     const payload = action.payload as Record<string, unknown>;
-    if (resolution === 'OVERRIDE_PRICE' && action.actionType !== 'SALE_COMPLETE') {
-      throw new BadRequestException('Price override is only available for sales.');
+    if (
+      resolution === 'OVERRIDE_PRICE' &&
+      action.actionType !== 'SALE_COMPLETE'
+    ) {
+      throw new BadRequestException(
+        'Price override is only available for sales.',
+      );
     }
     switch (action.actionType) {
       case 'SALE_COMPLETE':

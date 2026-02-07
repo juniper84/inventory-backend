@@ -40,7 +40,9 @@ export class SettingsService {
     const hasSms = Object.values(settings.groups).some(
       (group) => group.channels.sms,
     );
-    const hasEvents = Object.values(settings.events).some((event) => event.enabled);
+    const hasEvents = Object.values(settings.events).some(
+      (event) => event.enabled,
+    );
     return hasEvents && (hasWhatsapp || hasSms);
   }
 
@@ -137,7 +139,10 @@ export class SettingsService {
   private async upsertApprovalPolicy(
     businessId: string,
     actionType: string,
-    data: { thresholdType: 'NONE' | 'PERCENT' | 'AMOUNT'; thresholdValue: number | null },
+    data: {
+      thresholdType: 'NONE' | 'PERCENT' | 'AMOUNT';
+      thresholdValue: number | null;
+    },
     enabled: boolean,
   ) {
     const existing = await this.prisma.approvalPolicy.findFirst({
@@ -153,7 +158,9 @@ export class SettingsService {
           actionType,
           thresholdType: data.thresholdType,
           thresholdValue:
-            data.thresholdValue === null ? null : new Prisma.Decimal(data.thresholdValue),
+            data.thresholdValue === null
+              ? null
+              : new Prisma.Decimal(data.thresholdValue),
           requiredRoleIds: [],
           allowSelfApprove: false,
           status: 'ACTIVE',
@@ -166,7 +173,9 @@ export class SettingsService {
       data: {
         thresholdType: data.thresholdType,
         thresholdValue:
-          data.thresholdValue === null ? null : new Prisma.Decimal(data.thresholdValue),
+          data.thresholdValue === null
+            ? null
+            : new Prisma.Decimal(data.thresholdValue),
         status: enabled ? 'ACTIVE' : 'INACTIVE',
       },
     });

@@ -28,7 +28,11 @@ export class UsersService {
 
   async list(
     businessId: string,
-    query: PaginationQuery & { search?: string; status?: string; roleId?: string },
+    query: PaginationQuery & {
+      search?: string;
+      status?: string;
+      roleId?: string;
+    },
   ) {
     const pagination = parsePagination(query);
     const search = query.search?.trim();
@@ -36,17 +40,18 @@ export class UsersService {
       ...(search
         ? {
             OR: [
-              { name: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { email: { contains: search, mode: Prisma.QueryMode.insensitive } },
+              {
+                name: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
+              {
+                email: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
             ],
           }
         : {}),
-      ...(query.roleId
-        ? { roles: { some: { roleId: query.roleId } } }
-        : {}),
+      ...(query.roleId ? { roles: { some: { roleId: query.roleId } } } : {}),
     };
-    const memberships =
-      (await this.prisma.businessUser.findMany({
+    const memberships = (await this.prisma.businessUser.findMany({
       where: {
         businessId,
         ...(query.status ? { status: query.status as any } : {}),
@@ -283,9 +288,7 @@ export class UsersService {
         token,
         url: inviteUrl,
       }),
-      ctaLabel: inviteUrl
-        ? this.i18n.t(locale, 'email.invite.cta')
-        : undefined,
+      ctaLabel: inviteUrl ? this.i18n.t(locale, 'email.invite.cta') : undefined,
       ctaUrl: inviteUrl || undefined,
       brandName: this.i18n.t(locale, 'email.common.brandName'),
       supportLine: this.i18n.t(locale, 'email.common.supportLine'),

@@ -148,7 +148,10 @@ export class AuthService {
       where: { id: resolvedBusinessId },
     });
 
-    if (!business || ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)) {
+    if (
+      !business ||
+      ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)
+    ) {
       throw new UnauthorizedException('Business is not active.');
     }
 
@@ -283,7 +286,10 @@ export class AuthService {
     const business = await this.prisma.business.findUnique({
       where: { id: businessId },
     });
-    if (!business || ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)) {
+    if (
+      !business ||
+      ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)
+    ) {
       await this.auditService.logEvent({
         businessId,
         userId: user.id,
@@ -465,7 +471,9 @@ export class AuthService {
       .filter(
         (membership) =>
           membership.business &&
-          !['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(membership.business.status),
+          !['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(
+            membership.business.status,
+          ),
       )
       .map((membership) => ({
         businessId: membership.businessId,
@@ -786,7 +794,10 @@ export class AuthService {
     const business = await this.prisma.business.findUnique({
       where: { id: data.businessId },
     });
-    if (!business || ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)) {
+    if (
+      !business ||
+      ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)
+    ) {
       throw new UnauthorizedException('Business is not active.');
     }
 

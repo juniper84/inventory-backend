@@ -1,4 +1,9 @@
-import { ForbiddenException, Injectable, Inject, forwardRef } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
 import { LossReason, Prisma, StockMovementType } from '@prisma/client';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
@@ -46,8 +51,12 @@ export class StockService {
     const branchFilter = this.resolveBranchScope(branchScope, query.branchId);
     const variantFilter: Prisma.VariantWhereInput = {
       ...(query.status ? { status: query.status as any } : {}),
-      ...(query.categoryId ? { product: { categoryId: query.categoryId } } : {}),
-      ...(search ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } } : {}),
+      ...(query.categoryId
+        ? { product: { categoryId: query.categoryId } }
+        : {}),
+      ...(search
+        ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } }
+        : {}),
     };
     const variantFilterActive = Object.keys(variantFilter).length > 0;
     const where: Prisma.StockSnapshotWhereInput = {
@@ -120,9 +129,19 @@ export class StockService {
         ...(search
           ? {
               OR: [
-                { reason: { contains: search, mode: Prisma.QueryMode.insensitive } },
                 {
-                  variant: { name: { contains: search, mode: Prisma.QueryMode.insensitive } },
+                  reason: {
+                    contains: search,
+                    mode: Prisma.QueryMode.insensitive,
+                  },
+                },
+                {
+                  variant: {
+                    name: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
                 },
               ],
             }
@@ -131,7 +150,11 @@ export class StockService {
       include: {
         branch: true,
         variant: {
-          include: { baseUnit: true, sellUnit: true, product: { select: { name: true } } },
+          include: {
+            baseUnit: true,
+            sellUnit: true,
+            product: { select: { name: true } },
+          },
         },
         createdBy: { select: { id: true, name: true, email: true } },
         batch: true,
@@ -159,7 +182,9 @@ export class StockService {
         businessId,
         ...branchFilter,
         ...(query.variantId ? { variantId: query.variantId } : {}),
-        ...(search ? { code: { contains: search, mode: Prisma.QueryMode.insensitive } } : {}),
+        ...(search
+          ? { code: { contains: search, mode: Prisma.QueryMode.insensitive } }
+          : {}),
       },
       orderBy: { createdAt: 'desc' },
       ...pagination,
@@ -456,13 +481,13 @@ export class StockService {
           unitId: unitResolution.unitId,
           unitLabel,
           baseQuantity: Number(baseQuantity),
-        variantName: variant.name,
-        productName: variant.product?.name ?? null,
-        branchName: branch.name,
-        pendingAction: {
-          type: 'STOCK_ADJUSTMENT',
-          payload: approvalPayload,
-        },
+          variantName: variant.name,
+          productName: variant.product?.name ?? null,
+          branchName: branch.name,
+          pendingAction: {
+            type: 'STOCK_ADJUSTMENT',
+            payload: approvalPayload,
+          },
         },
         targetType: 'Variant',
         targetId: data.variantId,
@@ -782,13 +807,13 @@ export class StockService {
           unitLabel,
           baseCountedQuantity: Number(baseCountedQuantity),
           variance: Number(baseCountedQuantity) - expectedQuantity,
-        variantName: variant.name,
-        productName: variant.product?.name ?? null,
-        branchName: branch.name,
-        pendingAction: {
-          type: 'STOCK_COUNT',
-          payload: approvalPayload,
-        },
+          variantName: variant.name,
+          productName: variant.product?.name ?? null,
+          branchName: branch.name,
+          pendingAction: {
+            type: 'STOCK_COUNT',
+            payload: approvalPayload,
+          },
         },
         targetType: 'Variant',
         targetId: data.variantId,

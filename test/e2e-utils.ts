@@ -82,15 +82,14 @@ export const signupAndLogin = async (
       businessSelectionRequired?: boolean;
     };
     const payloadBase64 = accessToken?.split('.')[1];
-    const payload =
-      payloadBase64
-        ? JSON.parse(
-            Buffer.from(
-              payloadBase64.replace(/-/g, '+').replace(/_/g, '/'),
-              'base64',
-            ).toString('utf8'),
-          )
-        : null;
+    const payload = payloadBase64
+      ? JSON.parse(
+          Buffer.from(
+            payloadBase64.replace(/-/g, '+').replace(/_/g, '/'),
+            'base64',
+          ).toString('utf8'),
+        )
+      : null;
     return {
       token: accessToken,
       refreshToken,
@@ -148,15 +147,14 @@ export const signupAndLogin = async (
     refreshToken: string;
   };
   const payloadBase64 = accessToken?.split('.')[1];
-  const payload =
-    payloadBase64
-      ? JSON.parse(
-          Buffer.from(
-            payloadBase64.replace(/-/g, '+').replace(/_/g, '/'),
-            'base64',
-          ).toString('utf8'),
-        )
-      : null;
+  const payload = payloadBase64
+    ? JSON.parse(
+        Buffer.from(
+          payloadBase64.replace(/-/g, '+').replace(/_/g, '/'),
+          'base64',
+        ).toString('utf8'),
+      )
+    : null;
   const resolvedUserId = userId ?? payload?.sub ?? '';
   const resolvedBusinessId = businessId ?? payload?.businessId ?? '';
 
@@ -207,7 +205,7 @@ export const seedCoreFixtures = async (
       });
     const units = Array.isArray(unitListRes.body)
       ? unitListRes.body
-      : unitListRes.body?.items ?? [];
+      : (unitListRes.body?.items ?? []);
     unitId = units.find(
       (unit: { code?: string; id?: string }) => unit.code === 'piece',
     )?.id;

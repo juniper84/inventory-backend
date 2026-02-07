@@ -42,9 +42,15 @@ export class SuppliersService {
       ...(search
         ? {
             OR: [
-              { name: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { phone: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { email: { contains: search, mode: Prisma.QueryMode.insensitive } },
+              {
+                name: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
+              {
+                phone: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
+              {
+                email: { contains: search, mode: Prisma.QueryMode.insensitive },
+              },
             ],
           }
         : {}),

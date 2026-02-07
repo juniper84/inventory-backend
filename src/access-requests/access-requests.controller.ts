@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Post, Req } from '@nestjs/common';
+import { Body, Controller, Post, Req } from '@nestjs/common';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
 import { AccessRequestsService } from './access-requests.service';
@@ -13,9 +13,6 @@ export class AccessRequestsController {
     @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { permission?: string; path?: string; reason?: string },
   ) {
-    if (!body.reason?.trim()) {
-      throw new BadRequestException('reason is required.');
-    }
     return this.accessRequestsService.createRequest({
       businessId: req.user?.businessId || '',
       userId: req.user?.sub || '',

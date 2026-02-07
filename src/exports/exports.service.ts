@@ -595,7 +595,9 @@ export class ExportsService {
     const searchFilters = search
       ? ([
           { id: { contains: search, mode: Prisma.QueryMode.insensitive } },
-          { lastError: { contains: search, mode: Prisma.QueryMode.insensitive } },
+          {
+            lastError: { contains: search, mode: Prisma.QueryMode.insensitive },
+          },
           ...(searchType ? [{ type: searchType }] : []),
           ...(searchStatus ? [{ status: searchStatus }] : []),
         ] as Prisma.ExportJobWhereInput[])
@@ -757,9 +759,11 @@ export class ExportsService {
             };
             try {
               const downloadUrl = attachment.storageKey
-                ? (await this.storageService.createPresignedDownload({
-                    key: attachment.storageKey,
-                  })).url
+                ? (
+                    await this.storageService.createPresignedDownload({
+                      key: attachment.storageKey,
+                    })
+                  ).url
                 : attachment.url;
               const response = await fetch(downloadUrl);
               if (!response.ok) {

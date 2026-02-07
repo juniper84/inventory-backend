@@ -1,6 +1,9 @@
 import { NotificationEventKey } from './notification-config';
 export type WhatsAppTemplateLocale = 'en' | 'sw';
-export const WHATSAPP_TEMPLATE_SIDS: Record<WhatsAppTemplateLocale, Partial<Record<NotificationEventKey, string>>> = {
+export const WHATSAPP_TEMPLATE_SIDS: Record<
+  WhatsAppTemplateLocale,
+  Partial<Record<NotificationEventKey, string>>
+> = {
   en: {
     lowStock: 'HXe0ed51bc17dceaa50f0ac712030df6c7',
     pendingApprovals: 'HX8d0c1227a0c1592a333be2a880b63fe3',
@@ -33,6 +36,5 @@ export const WHATSAPP_TEMPLATE_SIDS: Record<WhatsAppTemplateLocale, Partial<Reco
     securityRefreshTokenReuse: 'HX873289b88cafd5efd20857be6241b463',
     securityUnusualLogin: 'HX0423f53f6a2857cfb2a94ff6a1b5ce74',
   },
-  sw: {
-  },
+  sw: {},
 };

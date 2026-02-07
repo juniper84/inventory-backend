@@ -22,15 +22,31 @@ const endpoints: Endpoint[] = [
   { method: 'GET', path: '/roles/invalid/permissions' },
   { method: 'POST', path: '/roles', body: { name: 'Test Role' } },
   { method: 'PUT', path: '/roles/invalid', body: { name: 'Test Role' } },
-  { method: 'PUT', path: '/roles/invalid/permissions', body: { permissionIds: [] } },
+  {
+    method: 'PUT',
+    path: '/roles/invalid/permissions',
+    body: { permissionIds: [] },
+  },
   { method: 'GET', path: '/users?limit=1' },
-  { method: 'POST', path: '/users', body: { name: 'Test', email: 'x@test.local' } },
+  {
+    method: 'POST',
+    path: '/users',
+    body: { name: 'Test', email: 'x@test.local' },
+  },
   { method: 'PUT', path: '/users/invalid', body: { name: 'Test' } },
   { method: 'POST', path: '/users/invalid/deactivate' },
-  { method: 'POST', path: '/users/invite', body: { email: 'x@test.local', roleIds: [] } },
+  {
+    method: 'POST',
+    path: '/users/invite',
+    body: { email: 'x@test.local', roleIds: [] },
+  },
   { method: 'GET', path: '/users/invalid/roles' },
   { method: 'POST', path: '/users/invalid/roles', body: { roleIds: [] } },
-  { method: 'POST', path: '/users/invalid/roles/remove', body: { roleIds: [] } },
+  {
+    method: 'POST',
+    path: '/users/invalid/roles/remove',
+    body: { roleIds: [] },
+  },
   { method: 'GET', path: '/categories?limit=1' },
   { method: 'POST', path: '/categories', body: { name: 'Test' } },
   { method: 'PUT', path: '/categories/invalid', body: { name: 'Test' } },
@@ -41,17 +57,53 @@ const endpoints: Endpoint[] = [
   { method: 'POST', path: '/variants', body: { name: 'Test' } },
   { method: 'PUT', path: '/variants/invalid', body: { name: 'Test' } },
   { method: 'GET', path: '/barcodes/lookup?code=missing' },
-  { method: 'POST', path: '/barcodes', body: { variantId: 'invalid', code: 'x' } },
-  { method: 'POST', path: '/barcodes/generate', body: { variantId: 'invalid' } },
-  { method: 'POST', path: '/barcodes/invalid/reassign', body: { newVariantId: 'invalid' } },
-  { method: 'POST', path: '/barcodes/labels', body: { variantIds: ['invalid'] } },
-  { method: 'POST', path: '/variants/invalid/sku', body: { sku: 'SKU-1', reason: 'test' } },
-  { method: 'POST', path: '/variants/invalid/availability', body: { branchId: 'invalid', isActive: true } },
-  { method: 'POST', path: '/products/invalid/images/presign', body: { filename: 'x.jpg', contentType: 'image/jpeg' } },
-  { method: 'POST', path: '/products/invalid/images', body: { url: 'x', filename: 'x', mimeType: 'image/jpeg', sizeMb: 1 } },
+  {
+    method: 'POST',
+    path: '/barcodes',
+    body: { variantId: 'invalid', code: 'x' },
+  },
+  {
+    method: 'POST',
+    path: '/barcodes/generate',
+    body: { variantId: 'invalid' },
+  },
+  {
+    method: 'POST',
+    path: '/barcodes/invalid/reassign',
+    body: { newVariantId: 'invalid' },
+  },
+  {
+    method: 'POST',
+    path: '/barcodes/labels',
+    body: { variantIds: ['invalid'] },
+  },
+  {
+    method: 'POST',
+    path: '/variants/invalid/sku',
+    body: { sku: 'SKU-1', reason: 'test' },
+  },
+  {
+    method: 'POST',
+    path: '/variants/invalid/availability',
+    body: { branchId: 'invalid', isActive: true },
+  },
+  {
+    method: 'POST',
+    path: '/products/invalid/images/presign',
+    body: { filename: 'x.jpg', contentType: 'image/jpeg' },
+  },
+  {
+    method: 'POST',
+    path: '/products/invalid/images',
+    body: { url: 'x', filename: 'x', mimeType: 'image/jpeg', sizeMb: 1 },
+  },
   { method: 'POST', path: '/products/invalid/images/invalid/primary' },
   { method: 'POST', path: '/products/invalid/images/invalid/remove' },
-  { method: 'POST', path: '/variants/invalid/image/presign', body: { filename: 'x.jpg', contentType: 'image/jpeg' } },
+  {
+    method: 'POST',
+    path: '/variants/invalid/image/presign',
+    body: { filename: 'x.jpg', contentType: 'image/jpeg' },
+  },
   { method: 'POST', path: '/variants/invalid/image', body: { imageUrl: 'x' } },
   { method: 'GET', path: '/stock?limit=1' },
   { method: 'GET', path: '/stock/movements?limit=1' },
@@ -85,7 +137,11 @@ const endpoints: Endpoint[] = [
   { method: 'POST', path: '/price-lists', body: {} },
   { method: 'PUT', path: '/price-lists/invalid', body: {} },
   { method: 'POST', path: '/price-lists/invalid/items', body: {} },
-  { method: 'POST', path: '/price-lists/invalid/items/invalid/remove', body: {} },
+  {
+    method: 'POST',
+    path: '/price-lists/invalid/items/invalid/remove',
+    body: {},
+  },
   { method: 'POST', path: '/sales/draft', body: {} },
   { method: 'POST', path: '/sales/complete', body: {} },
   { method: 'POST', path: '/sales/invalid/void' },
@@ -110,7 +166,11 @@ const endpoints: Endpoint[] = [
   { method: 'GET', path: '/reports/customers/export?branchId=invalid' },
   { method: 'GET', path: '/approvals?limit=1' },
   { method: 'POST', path: '/approvals/invalid/approve' },
-  { method: 'POST', path: '/approvals/invalid/reject', body: { reason: 'test' } },
+  {
+    method: 'POST',
+    path: '/approvals/invalid/reject',
+    body: { reason: 'test' },
+  },
   { method: 'GET', path: '/audit-logs?limit=1' },
   { method: 'GET', path: '/audit-logs/invalid' },
   { method: 'GET', path: '/audit-logs/export?format=csv' },
@@ -171,7 +231,10 @@ const endpoints: Endpoint[] = [
   { method: 'POST', path: '/platform/businesses/invalid/purge' },
   { method: 'POST', path: '/platform/support-access/requests', body: {} },
   { method: 'GET', path: '/platform/support-access/requests?limit=1' },
-  { method: 'POST', path: '/platform/support-access/requests/invalid/activate' },
+  {
+    method: 'POST',
+    path: '/platform/support-access/requests/invalid/activate',
+  },
   { method: 'POST', path: '/platform/support-access/login', body: {} },
   { method: 'POST', path: '/platform/exports/on-exit', body: {} },
   { method: 'PATCH', path: '/platform/exports/invalid/delivered', body: {} },
@@ -181,7 +244,11 @@ const endpoints: Endpoint[] = [
   { method: 'POST', path: '/platform/subscription-requests/invalid/reject' },
   { method: 'PATCH', path: '/platform/businesses/invalid/review', body: {} },
   { method: 'POST', path: '/platform/businesses/invalid/revoke-sessions' },
-  { method: 'PATCH', path: '/platform/businesses/invalid/rate-limits', body: {} },
+  {
+    method: 'PATCH',
+    path: '/platform/businesses/invalid/rate-limits',
+    body: {},
+  },
   { method: 'GET', path: '/platform/subscriptions/invalid/history' },
   { method: 'GET', path: '/platform/businesses/invalid/health' },
   { method: 'GET', path: '/platform/businesses/invalid/devices' },
@@ -211,19 +278,22 @@ describe('Protected endpoints require auth (e2e)', () => {
     }
   });
 
-  it.each(endpoints)('rejects unauthenticated %s %s', async ({ method, path, body }) => {
-    const req = request(app.getHttpServer());
-    const fullPath = `${API_PREFIX}${path}`;
-    const res = await (method === 'GET'
-      ? req.get(fullPath)
-      : method === 'POST'
-      ? req.post(fullPath).send(body ?? {})
-      : method === 'PUT'
-      ? req.put(fullPath).send(body ?? {})
-      : method === 'PATCH'
-      ? req.patch(fullPath).send(body ?? {})
-      : req.delete(fullPath));
+  it.each(endpoints)(
+    'rejects unauthenticated %s %s',
+    async ({ method, path, body }) => {
+      const req = request(app.getHttpServer());
+      const fullPath = `${API_PREFIX}${path}`;
+      const res = await (method === 'GET'
+        ? req.get(fullPath)
+        : method === 'POST'
+          ? req.post(fullPath).send(body ?? {})
+          : method === 'PUT'
+            ? req.put(fullPath).send(body ?? {})
+            : method === 'PATCH'
+              ? req.patch(fullPath).send(body ?? {})
+              : req.delete(fullPath));
 
-    expect(res.status).toBeGreaterThanOrEqual(401);
-  });
+      expect(res.status).toBeGreaterThanOrEqual(401);
+    },
+  );
 });

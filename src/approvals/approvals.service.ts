@@ -56,7 +56,9 @@ export class ApprovalsService {
 
   private getBranchIdFromMetadata(metadata?: Record<string, unknown>) {
     const directBranchId =
-      metadata && typeof metadata.branchId === 'string' ? metadata.branchId : null;
+      metadata && typeof metadata.branchId === 'string'
+        ? metadata.branchId
+        : null;
     if (directBranchId) {
       return directBranchId;
     }
@@ -126,7 +128,8 @@ export class ApprovalsService {
       unitId: typeof payload.unitId === 'string' ? payload.unitId : undefined,
       reason: typeof payload.reason === 'string' ? payload.reason : undefined,
       type: type === 'NEGATIVE' ? 'NEGATIVE' : 'POSITIVE',
-      batchId: typeof payload.batchId === 'string' ? payload.batchId : undefined,
+      batchId:
+        typeof payload.batchId === 'string' ? payload.batchId : undefined,
       lossReason,
       idempotencyKey:
         typeof payload.idempotencyKey === 'string'
@@ -141,7 +144,9 @@ export class ApprovalsService {
     const variantId =
       typeof payload.variantId === 'string' ? payload.variantId : null;
     const countedQuantity =
-      typeof payload.countedQuantity === 'number' ? payload.countedQuantity : null;
+      typeof payload.countedQuantity === 'number'
+        ? payload.countedQuantity
+        : null;
     if (!branchId || !variantId || countedQuantity === null) {
       return null;
     }
@@ -151,7 +156,8 @@ export class ApprovalsService {
       countedQuantity,
       unitId: typeof payload.unitId === 'string' ? payload.unitId : undefined,
       reason: typeof payload.reason === 'string' ? payload.reason : undefined,
-      batchId: typeof payload.batchId === 'string' ? payload.batchId : undefined,
+      batchId:
+        typeof payload.batchId === 'string' ? payload.batchId : undefined,
       idempotencyKey:
         typeof payload.idempotencyKey === 'string'
           ? payload.idempotencyKey
@@ -331,7 +337,12 @@ export class ApprovalsService {
           businessId,
           ...(query.status ? { status: query.status as RecordStatus } : {}),
           ...(search
-            ? { actionType: { contains: search, mode: Prisma.QueryMode.insensitive } }
+            ? {
+                actionType: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              }
             : {}),
         },
         orderBy: { createdAt: 'desc' },
@@ -386,8 +397,7 @@ export class ApprovalsService {
       },
     });
 
-    const resolvedPolicy =
-      policy ?? (await this.resolveDefaultPolicy(request));
+    const resolvedPolicy = policy ?? (await this.resolveDefaultPolicy(request));
 
     if (!resolvedPolicy) {
       return { required: false, approval: null };
@@ -536,10 +546,7 @@ export class ApprovalsService {
       case 'SALE_DISCOUNT': {
         const percent = approvalDefaults.discountThresholdPercent;
         const amount = approvalDefaults.discountThresholdAmount;
-        if (
-          typeof percent === 'number' &&
-          percent > 0
-        ) {
+        if (typeof percent === 'number' && percent > 0) {
           return {
             thresholdType: ApprovalThresholdType.PERCENT,
             thresholdValue: new Prisma.Decimal(percent),
@@ -547,10 +554,7 @@ export class ApprovalsService {
             allowSelfApprove: false,
           };
         }
-        if (
-          typeof amount === 'number' &&
-          amount > 0
-        ) {
+        if (typeof amount === 'number' && amount > 0) {
           return {
             thresholdType: ApprovalThresholdType.AMOUNT,
             thresholdValue: new Prisma.Decimal(amount),
@@ -764,9 +768,24 @@ export class ApprovalsService {
       ...(search
         ? {
             OR: [
-              { actionType: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { reason: { contains: search, mode: Prisma.QueryMode.insensitive } },
-              { targetId: { contains: search, mode: Prisma.QueryMode.insensitive } },
+              {
+                actionType: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+              {
+                reason: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+              {
+                targetId: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
             ],
           }
         : {}),
@@ -837,7 +856,9 @@ export class ApprovalsService {
     const pendingAction = this.getPendingAction(approval.metadata);
     if (pendingAction) {
       if (!this.stockService) {
-        throw new BadRequestException('Stock service unavailable for approval.');
+        throw new BadRequestException(
+          'Stock service unavailable for approval.',
+        );
       }
       const requestedByUserId = approval.requestedByUserId ?? userId;
       if (pendingAction.type === 'STOCK_ADJUSTMENT') {

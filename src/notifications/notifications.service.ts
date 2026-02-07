@@ -1,6 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Prisma, Notification, NotificationPriority, NotificationStatus } from '@prisma/client';
+import {
+  Prisma,
+  Notification,
+  NotificationPriority,
+  NotificationStatus,
+} from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -143,8 +148,18 @@ export class NotificationsService {
           ? [
               {
                 OR: [
-                  { title: { contains: search, mode: Prisma.QueryMode.insensitive } },
-                  { message: { contains: search, mode: Prisma.QueryMode.insensitive } },
+                  {
+                    title: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
+                  {
+                    message: {
+                      contains: search,
+                      mode: Prisma.QueryMode.insensitive,
+                    },
+                  },
                 ],
               },
             ]
@@ -206,7 +221,11 @@ export class NotificationsService {
 
   async markAllRead(businessId: string) {
     const result = await this.prisma.notification.updateMany({
-      where: { businessId, status: { not: NotificationStatus.READ }, archivedAt: null },
+      where: {
+        businessId,
+        status: { not: NotificationStatus.READ },
+        archivedAt: null,
+      },
       data: { status: NotificationStatus.READ, readAt: new Date() },
     });
     return { count: result.count };
@@ -794,8 +813,8 @@ export class NotificationsService {
             (enriched.metadata as Record<string, unknown> | null) ?? null,
           );
           const ctaLabel = ctaUrl
-            ? this.i18n?.t(locale, 'email.common.notificationCta') ??
-              'Open New Vision Inventory'
+            ? (this.i18n?.t(locale, 'email.common.notificationCta') ??
+              'Open New Vision Inventory')
             : undefined;
           const emailPayload = buildBrandedEmail({
             subject: data.title,
@@ -803,7 +822,8 @@ export class NotificationsService {
             body: enriched.message,
             ctaLabel,
             ctaUrl: ctaUrl || undefined,
-            brandName: this.i18n?.t(locale, 'email.common.brandName') ??
+            brandName:
+              this.i18n?.t(locale, 'email.common.brandName') ??
               'New Vision Inventory',
             supportLine: this.i18n?.t(locale, 'email.common.supportLine'),
             securityLine: this.i18n?.t(locale, 'email.common.securityLine'),
@@ -920,8 +940,8 @@ export class NotificationsService {
           (enriched.metadata as Record<string, unknown> | null) ?? null,
         );
         const ctaLabel = ctaUrl
-          ? this.i18n?.t(locale, 'email.common.notificationCta') ??
-            'Open New Vision Inventory'
+          ? (this.i18n?.t(locale, 'email.common.notificationCta') ??
+            'Open New Vision Inventory')
           : undefined;
         const emailPayload = buildBrandedEmail({
           subject: data.title,
@@ -929,7 +949,8 @@ export class NotificationsService {
           body: enriched.message,
           ctaLabel,
           ctaUrl: ctaUrl || undefined,
-          brandName: this.i18n?.t(locale, 'email.common.brandName') ??
+          brandName:
+            this.i18n?.t(locale, 'email.common.brandName') ??
             'New Vision Inventory',
           supportLine: this.i18n?.t(locale, 'email.common.supportLine'),
           securityLine: this.i18n?.t(locale, 'email.common.securityLine'),

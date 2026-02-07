@@ -18,7 +18,14 @@ type BrandedEmailContent = {
 const LOGO_PATH = path.join(__dirname, 'assets', 'logo-email.png');
 const FALLBACK_LOGO_PATHS = [
   path.join(process.cwd(), 'src', 'mailer', 'assets', 'logo-email.png'),
-  path.join(process.cwd(), 'backend', 'src', 'mailer', 'assets', 'logo-email.png'),
+  path.join(
+    process.cwd(),
+    'backend',
+    'src',
+    'mailer',
+    'assets',
+    'logo-email.png',
+  ),
   path.join(process.cwd(), 'src', 'mailer', 'assets', 'logo.png'),
   path.join(process.cwd(), 'backend', 'src', 'mailer', 'assets', 'logo.png'),
 ];
@@ -37,7 +44,10 @@ const renderBody = (body: string) =>
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => `<p style="margin:0 0 12px;line-height:1.6;">${escapeHtml(line)}</p>`)
+    .map(
+      (line) =>
+        `<p style="margin:0 0 12px;line-height:1.6;">${escapeHtml(line)}</p>`,
+    )
     .join('');
 
 const getLogoDataUri = () => {
