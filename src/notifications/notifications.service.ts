@@ -314,9 +314,14 @@ export class NotificationsService {
     raw: Record<string, unknown> | null | undefined,
   ) {
     if (!raw || typeof raw !== 'object') {
-      return { channels: {}, events: {} } as {
+      return {
+        channels: {},
+        events: {},
+        locale: 'en',
+      } as {
         channels: Partial<Record<NotificationChannel, boolean>>;
         events: Record<string, boolean>;
+        locale: WhatsAppTemplateLocale;
       };
     }
     const input = raw;
@@ -328,6 +333,7 @@ export class NotificationsService {
       typeof input.events === 'object' && input.events !== null
         ? (input.events as Record<string, boolean>)
         : {};
+    const locale: WhatsAppTemplateLocale = input.locale === 'sw' ? 'sw' : 'en';
     return {
       channels: {
         email: typeof channels.email === 'boolean' ? channels.email : undefined,
@@ -338,6 +344,7 @@ export class NotificationsService {
             : undefined,
       },
       events: events ?? {},
+      locale,
     };
   }
 
@@ -688,6 +695,18 @@ export class NotificationsService {
     );
   }
 
+  private buildWhatsappTemplateVariables(params: {
+    recipientName?: string | null;
+    title: string;
+    message: string;
+  }) {
+    return {
+      '1': params.recipientName || 'there',
+      '2': params.title,
+      '3': params.message,
+    };
+  }
+
   async notifyEvent(data: {
     businessId: string;
     eventKey: NotificationEventKey;
@@ -867,7 +886,7 @@ export class NotificationsService {
         this.allowUserChannel(preferences, 'whatsapp')
       ) {
         try {
-          const locale: WhatsAppTemplateLocale = 'en';
+          const locale = preferences.locale;
           const templateSid = this.resolveWhatsappTemplate(
             data.eventKey,
             locale,
@@ -876,7 +895,11 @@ export class NotificationsService {
             await this.whatsappService.sendTemplate({
               to: membership.user.phone,
               contentSid: templateSid,
-              variables: { '1': membership.user.name || 'there' },
+              variables: this.buildWhatsappTemplateVariables({
+                recipientName: membership.user.name,
+                title: data.title,
+                message: enriched.message,
+              }),
             });
           } else {
             await this.whatsappService.sendMessage({
@@ -992,7 +1015,7 @@ export class NotificationsService {
       this.allowUserChannel(preferences, 'whatsapp')
     ) {
       try {
-        const locale: WhatsAppTemplateLocale = 'en';
+        const locale = preferences.locale;
         const templateSid = data.eventKey
           ? this.resolveWhatsappTemplate(data.eventKey, locale)
           : undefined;
@@ -1000,7 +1023,11 @@ export class NotificationsService {
           await this.whatsappService.sendTemplate({
             to: user.phone,
             contentSid: templateSid,
-            variables: { '1': user.name || 'there' },
+            variables: this.buildWhatsappTemplateVariables({
+              recipientName: user.name,
+              title: data.title,
+              message: enriched.message,
+            }),
           });
         } else {
           await this.whatsappService.sendMessage({

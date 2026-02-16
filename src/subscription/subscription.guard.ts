@@ -161,6 +161,13 @@ export class SubscriptionGuard implements CanActivate {
               graceEndsAt: graceEndsAt.toISOString(),
             },
           });
+          await this.prisma.business.updateMany({
+            where: {
+              id: record.businessId,
+              status: { not: 'GRACE' },
+            },
+            data: { status: 'GRACE' },
+          });
         }
 
         if (effectiveStatus === SubscriptionStatus.EXPIRED) {
@@ -207,6 +214,13 @@ export class SubscriptionGuard implements CanActivate {
               status: updated.status,
               expiresAt: expiresAt.toISOString(),
             },
+          });
+          await this.prisma.business.updateMany({
+            where: {
+              id: record.businessId,
+              status: { not: 'EXPIRED' },
+            },
+            data: { status: 'EXPIRED' },
           });
         }
       }

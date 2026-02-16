@@ -21,6 +21,14 @@ export default () => ({
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
     from: process.env.SMTP_FROM,
   },
+  mail: {
+    provider: process.env.MAIL_PROVIDER || 'ses',
+    from: process.env.POSTMARK_FROM || process.env.SMTP_FROM,
+  },
+  postmark: {
+    serverToken: process.env.POSTMARK_SERVER_TOKEN,
+    from: process.env.POSTMARK_FROM || process.env.SMTP_FROM,
+  },
   infobip: {
     baseUrl: process.env.INFOBIP_BASE_URL,
     apiKey: process.env.INFOBIP_API_KEY,

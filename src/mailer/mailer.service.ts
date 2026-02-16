@@ -13,38 +13,76 @@ type MailPayload = {
 export class MailerService {
   private readonly logger = new Logger(MailerService.name);
   private sesClient: SESClient | null = null;
-  private fromAddress: string | null = null;
+  private readonly provider: string;
+  private readonly sesFromAddress: string | null = null;
+  private readonly postmarkToken: string | null = null;
+  private readonly postmarkFromAddress: string | null = null;
 
   constructor(private readonly configService: ConfigService) {
+    this.provider = (
+      this.configService.get<string>('mail.provider') || 'ses'
+    ).toLowerCase();
+
     const region = this.configService.get<string>('ses.region');
     const accessKeyId = this.configService.get<string>('ses.accessKeyId');
     const secretAccessKey = this.configService.get<string>(
       'ses.secretAccessKey',
     );
-    const from = this.configService.get<string>('ses.from');
+    const sesFrom = this.configService.get<string>('ses.from');
+    const postmarkToken =
+      this.configService.get<string>('postmark.serverToken') || null;
+    const postmarkFrom =
+      this.configService.get<string>('postmark.from') || null;
 
     this.logger.log(
-      `Mailer config: region=${region ?? 'unset'} from=${from ?? 'unset'}`,
+      `Mailer config: provider=${this.provider} sesRegion=${region ?? 'unset'} sesFrom=${sesFrom ?? 'unset'} postmarkFrom=${postmarkFrom ?? 'unset'} postmarkToken=${postmarkToken ? 'set' : 'unset'}`,
     );
 
-    if (region && accessKeyId && secretAccessKey && from) {
+    if (region && accessKeyId && secretAccessKey && sesFrom) {
       this.sesClient = new SESClient({
         region,
         credentials: { accessKeyId, secretAccessKey },
       });
-      this.fromAddress = from;
+      this.sesFromAddress = sesFrom;
     }
+    this.postmarkToken = postmarkToken;
+    this.postmarkFromAddress = postmarkFrom;
   }
 
-  async sendEmail(payload: MailPayload) {
-    if (!this.sesClient || !this.fromAddress) {
+  private async sendWithPostmark(payload: MailPayload) {
+    if (!this.postmarkToken || !this.postmarkFromAddress) {
+      return { skipped: true };
+    }
+    const response = await fetch('https://api.postmarkapp.com/email', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'X-Postmark-Server-Token': this.postmarkToken,
+      },
+      body: JSON.stringify({
+        From: this.postmarkFromAddress,
+        To: payload.to,
+        Subject: payload.subject,
+        TextBody: payload.text,
+        HtmlBody: payload.html,
+        MessageStream: 'outbound',
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Postmark send failed: ${response.status} ${body}`);
+    }
+    return response.json();
+  }
+
+  private async sendWithSes(payload: MailPayload) {
+    if (!this.sesClient || !this.sesFromAddress) {
       return { skipped: true };
     }
 
-    this.logger.log(`Sending email: from=${this.fromAddress} to=${payload.to}`);
-
     const command = new SendEmailCommand({
-      Source: this.fromAddress,
+      Source: this.sesFromAddress,
       Destination: { ToAddresses: [payload.to] },
       Message: {
         Subject: { Data: payload.subject, Charset: 'UTF-8' },
@@ -58,5 +96,24 @@ export class MailerService {
     });
 
     return this.sesClient.send(command);
+  }
+
+  async sendEmail(payload: MailPayload) {
+    this.logger.log(`Sending email: provider=${this.provider} to=${payload.to}`);
+
+    if (this.provider === 'postmark') {
+      try {
+        return await this.sendWithPostmark(payload);
+      } catch (err) {
+        this.logger.warn(
+          `Postmark send failed, attempting SES fallback: ${
+            err instanceof Error ? err.message : 'unknown error'
+          }`,
+        );
+        return this.sendWithSes(payload);
+      }
+    }
+
+    return this.sendWithSes(payload);
   }
 }

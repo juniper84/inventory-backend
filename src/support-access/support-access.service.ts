@@ -3,6 +3,10 @@ import crypto from 'crypto';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  SupportRequestPriority,
+  SupportRequestSeverity,
+} from '@prisma/client';
+import {
   buildPaginatedResponse,
   parsePagination,
   PaginationQuery,
@@ -23,6 +27,8 @@ export class SupportAccessService {
     reason: string;
     scope?: string[];
     durationHours?: number;
+    severity?: SupportRequestSeverity;
+    priority?: SupportRequestPriority;
   }) {
     const duration =
       typeof data.durationHours === 'number' &&
@@ -34,6 +40,8 @@ export class SupportAccessService {
         businessId: data.businessId,
         platformAdminId: data.platformAdminId,
         reason: data.reason,
+        severity: data.severity ?? SupportRequestSeverity.MEDIUM,
+        priority: data.priority ?? SupportRequestPriority.MEDIUM,
         scope: data.scope ?? undefined,
         durationHours: duration,
       },
@@ -48,6 +56,8 @@ export class SupportAccessService {
       outcome: 'SUCCESS',
       metadata: {
         reason: data.reason,
+        severity: data.severity ?? SupportRequestSeverity.MEDIUM,
+        priority: data.priority ?? SupportRequestPriority.MEDIUM,
         scope: data.scope ?? null,
         durationHours: duration,
       },
@@ -57,20 +67,136 @@ export class SupportAccessService {
   }
 
   listRequestsForPlatform(
-    platformAdminId: string,
-    query: PaginationQuery & { status?: string } = {},
+    query: PaginationQuery & {
+      status?: string;
+      businessId?: string;
+      platformAdminId?: string;
+      severity?: string;
+      priority?: string;
+      requestedFrom?: string;
+      requestedTo?: string;
+    } = {},
   ) {
     const pagination = parsePagination(query);
+    const requestedFrom = query.requestedFrom
+      ? new Date(query.requestedFrom)
+      : null;
+    const requestedTo = query.requestedTo ? new Date(query.requestedTo) : null;
+    const requestedFromValue =
+      requestedFrom && !Number.isNaN(requestedFrom.getTime())
+        ? requestedFrom
+        : null;
+    const requestedToValue =
+      requestedTo && !Number.isNaN(requestedTo.getTime()) ? requestedTo : null;
     return this.prisma.supportAccessRequest
       .findMany({
         where: {
-          platformAdminId,
+          ...(query.platformAdminId
+            ? { platformAdminId: query.platformAdminId }
+            : {}),
+          ...(query.businessId ? { businessId: query.businessId } : {}),
           ...(query.status ? { status: query.status as any } : {}),
+          ...(query.severity ? { severity: query.severity as any } : {}),
+          ...(query.priority ? { priority: query.priority as any } : {}),
+          ...(requestedFromValue || requestedToValue
+            ? {
+                requestedAt: {
+                  ...(requestedFromValue ? { gte: requestedFromValue } : {}),
+                  ...(requestedToValue ? { lte: requestedToValue } : {}),
+                },
+              }
+            : {}),
+        },
+        include: {
+          sessions: {
+            where: { revokedAt: null },
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
         },
         orderBy: { requestedAt: 'desc' },
         ...pagination,
       })
       .then((items) => buildPaginatedResponse(items, pagination.take));
+  }
+
+  listSessionsForPlatform(
+    query: PaginationQuery & {
+      businessId?: string;
+      platformAdminId?: string;
+      activeOnly?: string;
+      requestId?: string;
+    } = {},
+  ) {
+    const pagination = parsePagination(query, 50, 200);
+    const now = new Date();
+    const activeOnly = query.activeOnly === 'true';
+    return this.prisma.supportAccessSession
+      .findMany({
+        where: {
+          ...(query.businessId ? { businessId: query.businessId } : {}),
+          ...(query.platformAdminId
+            ? { platformAdminId: query.platformAdminId }
+            : {}),
+          ...(query.requestId ? { requestId: query.requestId } : {}),
+          ...(activeOnly
+            ? {
+                revokedAt: null,
+                expiresAt: { gt: now },
+              }
+            : {}),
+        },
+        include: {
+          request: {
+            select: {
+              id: true,
+              reason: true,
+              status: true,
+              severity: true,
+              priority: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        ...pagination,
+      })
+      .then((items) => buildPaginatedResponse(items, pagination.take));
+  }
+
+  async revokeSession(data: {
+    sessionId: string;
+    platformAdminId: string;
+    reason: string;
+  }) {
+    if (!data.reason?.trim()) {
+      throw new BadRequestException('Reason is required.');
+    }
+    const session = await this.prisma.supportAccessSession.findUnique({
+      where: { id: data.sessionId },
+    });
+    if (!session) {
+      throw new BadRequestException('Session not found.');
+    }
+    if (session.revokedAt) {
+      return session;
+    }
+    const revoked = await this.prisma.supportAccessSession.update({
+      where: { id: data.sessionId },
+      data: { revokedAt: new Date() },
+    });
+    await this.auditService.logEvent({
+      businessId: session.businessId,
+      userId: data.platformAdminId,
+      action: 'SUPPORT_ACCESS_SESSION_REVOKE',
+      resourceType: 'SupportAccessSession',
+      resourceId: session.id,
+      outcome: 'SUCCESS',
+      reason: data.reason,
+      metadata: {
+        requestId: session.requestId,
+      },
+    });
+    return revoked;
   }
 
   listRequestsForBusiness(

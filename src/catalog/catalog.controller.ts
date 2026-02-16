@@ -84,7 +84,7 @@ export class CatalogController {
   @Permissions(PermissionsList.CATALOG_WRITE)
   createProduct(
     @Req() req: { user?: { businessId: string } },
-    @Body() body: { name: string; description?: string; categoryId?: string },
+    @Body() body: { name: string; description?: string; categoryId: string },
   ) {
     if (!body.categoryId) {
       throw new BadRequestException('categoryId is required.');

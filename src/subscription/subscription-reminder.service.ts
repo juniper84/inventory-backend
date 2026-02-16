@@ -172,6 +172,14 @@ export class SubscriptionReminderService
           },
         });
 
+        await this.prisma.business.updateMany({
+          where: {
+            id: subscription.businessId,
+            status: { not: 'EXPIRED' },
+          },
+          data: { status: 'EXPIRED' },
+        });
+
         await this.prisma.offlineDevice.updateMany({
           where: { businessId: subscription.businessId, status: 'ACTIVE' },
           data: { status: 'REVOKED', revokedAt: now },

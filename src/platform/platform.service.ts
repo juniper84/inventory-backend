@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -22,6 +23,8 @@ import {
   ExportJobType,
   Prisma,
   PlatformAnnouncementSegmentType,
+  PlatformIncidentSeverity,
+  PlatformIncidentStatus,
   SubscriptionRequestStatus,
   SubscriptionRequestType,
   SubscriptionStatus,
@@ -32,6 +35,10 @@ import {
   parsePagination,
   PaginationQuery,
 } from '../common/pagination';
+import {
+  claimIdempotency,
+  finalizeIdempotency,
+} from '../common/idempotency';
 import { resolveResourceName } from '../common/resource-labels';
 import {
   DEFAULT_APPROVAL_DEFAULTS,
@@ -49,6 +56,21 @@ type MetricsSeriesPoint = {
   offlineFailed: number;
   exportsPending: number;
 };
+type QueueStatusCounts = Record<string, number>;
+type QueueSummary = {
+  support: {
+    total: number;
+    byStatus: QueueStatusCounts;
+  };
+  exports: {
+    total: number;
+    byStatus: QueueStatusCounts;
+  };
+  subscriptions: {
+    total: number;
+    byStatus: QueueStatusCounts;
+  };
+};
 
 const RANGE_CONFIG: Record<
   Exclude<MetricsRange, 'custom'>,
@@ -57,6 +79,66 @@ const RANGE_CONFIG: Record<
   '24h': { hours: 24, bucketHours: 1 },
   '7d': { hours: 24 * 7, bucketHours: 24 },
   '30d': { hours: 24 * 30, bucketHours: 24 },
+};
+
+const BUSINESS_STATUS_TRANSITIONS: Record<BusinessStatus, Set<BusinessStatus>> = {
+  TRIAL: new Set([
+    BusinessStatus.ACTIVE,
+    BusinessStatus.GRACE,
+    BusinessStatus.EXPIRED,
+    BusinessStatus.SUSPENDED,
+    BusinessStatus.ARCHIVED,
+  ]),
+  ACTIVE: new Set([
+    BusinessStatus.GRACE,
+    BusinessStatus.EXPIRED,
+    BusinessStatus.SUSPENDED,
+    BusinessStatus.ARCHIVED,
+  ]),
+  GRACE: new Set([
+    BusinessStatus.ACTIVE,
+    BusinessStatus.EXPIRED,
+    BusinessStatus.SUSPENDED,
+    BusinessStatus.ARCHIVED,
+  ]),
+  EXPIRED: new Set([
+    BusinessStatus.ACTIVE,
+    BusinessStatus.GRACE,
+    BusinessStatus.SUSPENDED,
+    BusinessStatus.ARCHIVED,
+  ]),
+  SUSPENDED: new Set([
+    BusinessStatus.ACTIVE,
+    BusinessStatus.GRACE,
+    BusinessStatus.EXPIRED,
+    BusinessStatus.ARCHIVED,
+  ]),
+  ARCHIVED: new Set([BusinessStatus.DELETED]),
+  DELETED: new Set(),
+};
+
+const INCIDENT_STATUS_TRANSITIONS: Record<
+  PlatformIncidentStatus,
+  Set<PlatformIncidentStatus>
+> = {
+  OPEN: new Set([
+    PlatformIncidentStatus.INVESTIGATING,
+    PlatformIncidentStatus.MITIGATED,
+    PlatformIncidentStatus.RESOLVED,
+    PlatformIncidentStatus.CLOSED,
+  ]),
+  INVESTIGATING: new Set([
+    PlatformIncidentStatus.MITIGATED,
+    PlatformIncidentStatus.RESOLVED,
+    PlatformIncidentStatus.CLOSED,
+  ]),
+  MITIGATED: new Set([
+    PlatformIncidentStatus.INVESTIGATING,
+    PlatformIncidentStatus.RESOLVED,
+    PlatformIncidentStatus.CLOSED,
+  ]),
+  RESOLVED: new Set([PlatformIncidentStatus.CLOSED, PlatformIncidentStatus.INVESTIGATING]),
+  CLOSED: new Set([PlatformIncidentStatus.INVESTIGATING]),
 };
 
 @Injectable()
@@ -106,6 +188,138 @@ export class PlatformService {
         metadata: Object.keys(metadata).length
           ? (metadata as Prisma.InputJsonValue)
           : undefined,
+      },
+    });
+  }
+
+  private async assertBusinessConcurrency(
+    businessId: string,
+    expectedUpdatedAt?: Date | null,
+  ) {
+    if (!expectedUpdatedAt) {
+      return;
+    }
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId },
+      select: { updatedAt: true },
+    });
+    if (!business) {
+      throw new BadRequestException('Business not found.');
+    }
+    if (business.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+      throw new ConflictException(
+        'Business changed since last read. Refresh and retry.',
+      );
+    }
+  }
+
+  private async claimMutationIdempotency(
+    businessId: string,
+    scope: string,
+    key?: string,
+  ) {
+    const claim = await claimIdempotency(this.prisma, businessId, scope, key);
+    if (claim?.existing) {
+      throw new ConflictException('Duplicate idempotency key.');
+    }
+    return claim;
+  }
+
+  private assertValidBusinessTransition(from: BusinessStatus, to: BusinessStatus) {
+    if (from === to) {
+      return;
+    }
+    if (!BUSINESS_STATUS_TRANSITIONS[from].has(to)) {
+      throw new BadRequestException(
+        `Invalid business status transition: ${from} -> ${to}.`,
+      );
+    }
+  }
+
+  private assertValidIncidentTransition(
+    from: PlatformIncidentStatus,
+    to: PlatformIncidentStatus,
+  ) {
+    if (from === to) {
+      return;
+    }
+    if (!INCIDENT_STATUS_TRANSITIONS[from].has(to)) {
+      throw new BadRequestException(
+        `Invalid incident transition: ${from} -> ${to}.`,
+      );
+    }
+  }
+
+  private percentile(values: number[], percentile: number) {
+    if (!values.length) {
+      return 0;
+    }
+    const sorted = [...values].sort((a, b) => a - b);
+    const rank = Math.min(
+      sorted.length - 1,
+      Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1),
+    );
+    return sorted[rank] ?? 0;
+  }
+
+  private async createIncidentEvent(data: {
+    incidentId: string;
+    eventType: string;
+    createdByAdminId?: string;
+    note?: string;
+    fromStatus?: PlatformIncidentStatus;
+    toStatus?: PlatformIncidentStatus;
+    metadata?: Record<string, unknown>;
+  }) {
+    return this.prisma.platformIncidentEvent.create({
+      data: {
+        incidentId: data.incidentId,
+        eventType: data.eventType,
+        createdByAdminId: data.createdByAdminId ?? null,
+        note: data.note ?? null,
+        fromStatus: data.fromStatus ?? null,
+        toStatus: data.toStatus ?? null,
+        metadata: data.metadata
+          ? (data.metadata as Prisma.InputJsonValue)
+          : undefined,
+      },
+    });
+  }
+
+  private async syncBusinessReviewFromIncidents(businessId: string) {
+    const activeStatuses: PlatformIncidentStatus[] = [
+      PlatformIncidentStatus.OPEN,
+      PlatformIncidentStatus.INVESTIGATING,
+      PlatformIncidentStatus.MITIGATED,
+    ];
+    const activeIncidents = await this.prisma.platformIncident.findMany({
+      where: {
+        businessId,
+        status: { in: activeStatuses },
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+      take: 1,
+    });
+    const primary = activeIncidents[0];
+    if (!primary) {
+      await this.prisma.business.update({
+        where: { id: businessId },
+        data: {
+          underReview: false,
+          reviewReason: null,
+          reviewSeverity: null,
+          reviewedAt: new Date(),
+        },
+      });
+      return;
+    }
+    await this.prisma.business.update({
+      where: { id: businessId },
+      data: {
+        underReview: true,
+        reviewReason: primary.reason,
+        reviewSeverity: primary.severity,
+        reviewedAt: new Date(),
       },
     });
   }
@@ -275,18 +489,720 @@ export class PlatformService {
       .then((items) => buildPaginatedResponse(items, pagination.take));
   }
 
+  private async buildQueuesSummary(): Promise<QueueSummary> {
+    const [supportGrouped, exportsGrouped, subscriptionsGrouped] =
+      await Promise.all([
+        this.prisma.supportAccessRequest.groupBy({
+          by: ['status'],
+          _count: { _all: true },
+        }),
+        this.prisma.exportJob.groupBy({
+          by: ['status'],
+          _count: { _all: true },
+        }),
+        this.prisma.subscriptionRequest.groupBy({
+          by: ['status'],
+          _count: { _all: true },
+        }),
+      ]);
+
+    const toStatusMap = (
+      rows: Array<{ status: string; _count: { _all: number } }>,
+    ) =>
+      rows.reduce<QueueStatusCounts>((acc, row) => {
+        acc[row.status] = row._count._all;
+        return acc;
+      }, {});
+
+    const supportByStatus = toStatusMap(supportGrouped);
+    const exportsByStatus = toStatusMap(exportsGrouped);
+    const subscriptionsByStatus = toStatusMap(subscriptionsGrouped);
+
+    return {
+      support: {
+        total: Object.values(supportByStatus).reduce((sum, value) => sum + value, 0),
+        byStatus: supportByStatus,
+      },
+      exports: {
+        total: Object.values(exportsByStatus).reduce((sum, value) => sum + value, 0),
+        byStatus: exportsByStatus,
+      },
+      subscriptions: {
+        total: Object.values(subscriptionsByStatus).reduce(
+          (sum, value) => sum + value,
+          0,
+        ),
+        byStatus: subscriptionsByStatus,
+      },
+    };
+  }
+
+  async getQueuesSummary() {
+    return this.buildQueuesSummary();
+  }
+
+  async getOverviewSnapshot(params: {
+    range: MetricsRange;
+    from?: Date | null;
+    to?: Date | null;
+  }) {
+    const [metrics, queues, announcementsActive, recentActions, tierRows, userStatusRows] =
+      await Promise.all([
+        this.getPlatformMetrics(params.range, params.from, params.to),
+        this.buildQueuesSummary(),
+        this.prisma.platformAnnouncement.count({
+          where: {
+            startsAt: { lte: new Date() },
+            OR: [{ endsAt: null }, { endsAt: { gte: new Date() } }],
+          },
+        }),
+        this.prisma.platformAuditLog.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 12,
+        }),
+        this.prisma.subscription.groupBy({
+          by: ['tier'],
+          _count: { _all: true },
+        }),
+        this.prisma.businessUser.groupBy({
+          by: ['status'],
+          _count: { _all: true },
+        }),
+      ]);
+
+    const tierCounts = tierRows.reduce<Record<string, number>>((acc, row) => {
+      acc[row.tier] = row._count._all;
+      return acc;
+    }, {});
+    const knownTierTotal = Object.values(tierCounts).reduce((sum, value) => sum + value, 0);
+    const unknownTierCount = Math.max(0, metrics.totals.businesses - knownTierTotal);
+
+    const userCounts = userStatusRows.reduce<Record<string, number>>((acc, row) => {
+      acc[row.status] = row._count._all;
+      return acc;
+    }, {});
+    const totalUsers = Object.values(userCounts).reduce((sum, value) => sum + value, 0);
+    const activeUsers = userCounts.ACTIVE ?? 0;
+    const inactiveUsers = userCounts.INACTIVE ?? 0;
+    const pendingUsers = userCounts.PENDING ?? 0;
+    const queuePressureTotal =
+      queues.support.total + queues.exports.total + queues.subscriptions.total;
+
+    return {
+      generatedAt: new Date().toISOString(),
+      range: metrics.range,
+      kpis: {
+        businesses: metrics.totals.businesses,
+        activeBusinesses: metrics.totals.active,
+        underReview: metrics.totals.underReview,
+        offlineEnabled: metrics.totals.offlineEnabled,
+        totalStorageMb: metrics.storage.totalMb,
+        totalUsers,
+        activeUsers,
+      },
+      anomalies: {
+        offlineFailures: metrics.offlineFailures,
+        exportsPending: metrics.exports.pending,
+        apiErrorRate: metrics.api.errorRate,
+        apiAvgLatencyMs: metrics.api.avgLatency,
+        activeAnnouncements: announcementsActive,
+      },
+      distributions: {
+        tiers: [
+          {
+            tier: SubscriptionTier.STARTER,
+            count: tierCounts[SubscriptionTier.STARTER] ?? 0,
+          },
+          {
+            tier: SubscriptionTier.BUSINESS,
+            count: tierCounts[SubscriptionTier.BUSINESS] ?? 0,
+          },
+          {
+            tier: SubscriptionTier.ENTERPRISE,
+            count: tierCounts[SubscriptionTier.ENTERPRISE] ?? 0,
+          },
+          { tier: 'UNKNOWN', count: unknownTierCount },
+        ],
+        businessStatuses: [
+          { status: 'ACTIVE', count: metrics.totals.active },
+          { status: 'GRACE', count: metrics.totals.grace },
+          { status: 'EXPIRED', count: metrics.totals.expired },
+          { status: 'SUSPENDED', count: metrics.totals.suspended },
+          { status: 'UNDER_REVIEW', count: metrics.totals.underReview },
+        ],
+        users: {
+          active: activeUsers,
+          inactive: inactiveUsers,
+          pending: pendingUsers,
+          total: totalUsers,
+        },
+      },
+      signals: {
+        queuePressureTotal,
+        exportsFailed: queues.exports.byStatus[ExportJobStatus.FAILED] ?? 0,
+        apiTotalRequests: metrics.api.totalRequests,
+      },
+      queues,
+      activity: recentActions.map((entry) => ({
+        id: entry.id,
+        action: entry.action,
+        resourceType: entry.resourceType,
+        resourceId: entry.resourceId,
+        reason: entry.reason,
+        metadata: entry.metadata,
+        createdAt: entry.createdAt,
+      })),
+      series: metrics.series,
+    };
+  }
+
+  async getHealthMatrix() {
+    const now = new Date();
+    const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const sevenDaysStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const staleDeviceThreshold = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    const [
+      metrics,
+      queues,
+      offlineFailedCount,
+      exportsPendingCount,
+      reviewCount,
+      offlineFailed7dCount,
+      staleActiveDevices,
+      revokedDevices,
+    ] = await Promise.all([
+        this.getPlatformMetrics('24h', null, now),
+        this.buildQueuesSummary(),
+        this.prisma.offlineAction.count({
+          where: { status: 'FAILED', createdAt: { gte: start, lte: now } },
+        }),
+        this.prisma.exportJob.count({
+          where: { status: 'PENDING' },
+        }),
+        this.prisma.business.count({ where: { underReview: true } }),
+        this.prisma.offlineAction.count({
+          where: { status: 'FAILED', createdAt: { gte: sevenDaysStart, lte: now } },
+        }),
+        this.prisma.offlineDevice.count({
+          where: {
+            status: 'ACTIVE',
+            OR: [{ lastSeenAt: null }, { lastSeenAt: { lt: staleDeviceThreshold } }],
+          },
+        }),
+        this.prisma.offlineDevice.count({
+          where: { status: 'REVOKED' },
+        }),
+      ]);
+
+    const dependencyStatus = (
+      signal: number,
+      warnThreshold: number,
+      criticalThreshold: number,
+    ) => {
+      if (signal >= criticalThreshold) return 'CRITICAL';
+      if (signal >= warnThreshold) return 'WARNING';
+      return 'HEALTHY';
+    };
+
+    const dependencies = [
+      {
+        key: 'api',
+        label: 'Core API',
+        status: dependencyStatus(metrics.api.errorRate * 100, 2, 5),
+        detail: {
+          errorRate: metrics.api.errorRate,
+          avgLatencyMs: metrics.api.avgLatency,
+          p95LatencyMs: metrics.api.p95Latency,
+          p99LatencyMs: metrics.api.p99Latency,
+          slowEndpoints: metrics.api.slowEndpoints,
+        },
+      },
+      {
+        key: 'offline',
+        label: 'Offline Pipeline',
+        status: dependencyStatus(offlineFailedCount, 10, 30),
+        detail: {
+          failedActions24h: offlineFailedCount,
+          failedActions7d: offlineFailed7dCount,
+          staleActiveDevices,
+          revokedDevices,
+        },
+      },
+      {
+        key: 'exports',
+        label: 'Export Queue',
+        status: dependencyStatus(exportsPendingCount, 20, 60),
+        detail: { pending: exportsPendingCount },
+      },
+      {
+        key: 'support',
+        label: 'Support Queue',
+        status: dependencyStatus(queues.support.byStatus.PENDING ?? 0, 10, 25),
+        detail: { pending: queues.support.byStatus.PENDING ?? 0 },
+      },
+      {
+        key: 'subscriptions',
+        label: 'Subscription Requests',
+        status: dependencyStatus(
+          queues.subscriptions.byStatus.PENDING ?? 0,
+          10,
+          25,
+        ),
+        detail: { pending: queues.subscriptions.byStatus.PENDING ?? 0 },
+      },
+    ];
+
+    const rollups = dependencies.reduce(
+      (acc, item) => {
+        if (item.status === 'CRITICAL') acc.critical += 1;
+        else if (item.status === 'WARNING') acc.warning += 1;
+        else acc.healthy += 1;
+        return acc;
+      },
+      { healthy: 0, warning: 0, critical: 0 },
+    );
+    const overallStatus =
+      rollups.critical > 0
+        ? 'CRITICAL'
+        : rollups.warning > 0
+          ? 'WARNING'
+          : 'HEALTHY';
+
+    const totalQueuePending =
+      (queues.exports.byStatus.PENDING ?? 0) +
+      (queues.support.byStatus.PENDING ?? 0) +
+      (queues.subscriptions.byStatus.PENDING ?? 0);
+    const queuePressureScore = Math.min(
+      100,
+      totalQueuePending + (queues.exports.byStatus.FAILED ?? 0) * 2,
+    );
+    const queuePressureStatus =
+      queuePressureScore >= 80
+        ? 'CRITICAL'
+        : queuePressureScore >= 40
+          ? 'WARNING'
+          : 'HEALTHY';
+
+    const syncRiskScore = Math.min(
+      100,
+      offlineFailedCount * 2 + staleActiveDevices * 3 + revokedDevices,
+    );
+    const syncRiskStatus =
+      syncRiskScore >= 80
+        ? 'CRITICAL'
+        : syncRiskScore >= 40
+          ? 'WARNING'
+          : 'HEALTHY';
+
+    return {
+      generatedAt: now.toISOString(),
+      window: { start: start.toISOString(), end: now.toISOString() },
+      dependencies,
+      rollups: {
+        ...rollups,
+        overallStatus,
+      },
+      telemetry: {
+        api: {
+          totalRequests: metrics.api.totalRequests,
+          errorRate: metrics.api.errorRate,
+          avgLatencyMs: metrics.api.avgLatency,
+          p95LatencyMs: metrics.api.p95Latency,
+          p99LatencyMs: metrics.api.p99Latency,
+          leaders: metrics.api.slowEndpoints,
+        },
+        syncRisk: {
+          score: syncRiskScore,
+          status: syncRiskStatus,
+          failedActions24h: offlineFailedCount,
+          failedActions7d: offlineFailed7dCount,
+          staleActiveDevices,
+          revokedDevices,
+        },
+        queuePressure: {
+          score: queuePressureScore,
+          status: queuePressureStatus,
+          totalPending: totalQueuePending,
+          exportsPending: queues.exports.byStatus.PENDING ?? 0,
+          supportPending: queues.support.byStatus.PENDING ?? 0,
+          subscriptionsPending: queues.subscriptions.byStatus.PENDING ?? 0,
+          exportsFailed: queues.exports.byStatus.FAILED ?? 0,
+          lanes: queues,
+        },
+      },
+      pressure: {
+        underReviewBusinesses: reviewCount,
+        queues,
+      },
+    };
+  }
+
+  async getBusinessWorkspace(businessId: string) {
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId },
+      include: {
+        subscription: true,
+        settings: {
+          select: {
+            readOnlyEnabled: true,
+            readOnlyReason: true,
+            rateLimitOverride: true,
+          },
+        },
+        _count: {
+          select: {
+            branches: true,
+            businessUsers: true,
+            offlineDevices: true,
+          },
+        },
+      },
+    });
+
+    if (!business) {
+      throw new BadRequestException('Business not found.');
+    }
+
+    const [health, pendingSupport, pendingExports, pendingSubscriptionRequests, devices, auditActions] =
+      await Promise.all([
+        this.getBusinessHealth(businessId),
+        this.prisma.supportAccessRequest.count({
+          where: { businessId, status: 'PENDING' },
+        }),
+        this.prisma.exportJob.count({
+          where: { businessId, status: 'PENDING' },
+        }),
+        this.prisma.subscriptionRequest.count({
+          where: { businessId, status: 'PENDING' },
+        }),
+        this.prisma.offlineDevice.findMany({
+          where: { businessId },
+          orderBy: { createdAt: 'desc' },
+          take: 25,
+        }),
+        this.prisma.auditLog.findMany({
+          where: { businessId },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        }),
+      ]);
+
+    const recentAdminActions = auditActions.map((log) => ({
+      id: log.id,
+      action: log.action,
+      outcome: log.outcome,
+      resourceType: log.resourceType,
+      resourceId: log.resourceId,
+      reason: log.reason,
+      requestId: log.requestId,
+      sessionId: log.sessionId,
+      correlationId: log.correlationId,
+      createdAt: log.createdAt,
+    }));
+
+    return {
+      business: {
+        id: business.id,
+        name: business.name,
+        status: business.status,
+        underReview: business.underReview,
+        reviewReason: business.reviewReason,
+        reviewSeverity: business.reviewSeverity,
+        createdAt: business.createdAt,
+        updatedAt: business.updatedAt,
+        lastActivityAt: business.lastActivityAt,
+      },
+      subscription: business.subscription,
+      settings: business.settings,
+      counts: {
+        branches: business._count.branches,
+        users: business._count.businessUsers,
+        offlineDevices: business._count.offlineDevices,
+      },
+      risk: health,
+      queues: {
+        pendingSupport,
+        pendingExports,
+        pendingSubscriptionRequests,
+      },
+      devices,
+      recentAdminActions,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async getAuditTimeline(
+    query: PaginationQuery & {
+      businessId?: string;
+      action?: string;
+      resourceType?: string;
+      outcome?: string;
+      correlationId?: string;
+      requestId?: string;
+      sessionId?: string;
+    } = {},
+  ) {
+    const pagination = parsePagination(query, 80, 200);
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        ...(query.businessId ? { businessId: query.businessId } : {}),
+        ...(query.action ? { action: query.action } : {}),
+        ...(query.resourceType ? { resourceType: query.resourceType } : {}),
+        ...(query.outcome ? { outcome: query.outcome } : {}),
+        ...(query.correlationId ? { correlationId: query.correlationId } : {}),
+        ...(query.requestId ? { requestId: query.requestId } : {}),
+        ...(query.sessionId ? { sessionId: query.sessionId } : {}),
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      ...pagination,
+    });
+
+    const groups = new Map<
+      string,
+      {
+        id: string;
+        key: string;
+        groupType: 'correlation' | 'request' | 'session' | 'entry';
+        businessId: string;
+        startedAt: Date;
+        latestAt: Date;
+        count: number;
+        outcomes: Record<string, number>;
+        actions: Array<{
+          id: string;
+          action: string;
+          outcome: string;
+          resourceType: string;
+          resourceId: string | null;
+          createdAt: Date;
+        }>;
+      }
+    >();
+
+    logs.forEach((log) => {
+      const groupType = log.correlationId
+        ? 'correlation'
+        : log.requestId
+          ? 'request'
+          : log.sessionId
+            ? 'session'
+            : 'entry';
+      const key =
+        log.correlationId ??
+        log.requestId ??
+        log.sessionId ??
+        `entry:${log.id}`;
+      const existing = groups.get(key);
+      if (!existing) {
+        groups.set(key, {
+          id: key,
+          key,
+          groupType,
+          businessId: log.businessId,
+          startedAt: log.createdAt,
+          latestAt: log.createdAt,
+          count: 1,
+          outcomes: { [log.outcome]: 1 },
+          actions: [
+            {
+              id: log.id,
+              action: log.action,
+              outcome: log.outcome,
+              resourceType: log.resourceType,
+              resourceId: log.resourceId,
+              createdAt: log.createdAt,
+            },
+          ],
+        });
+        return;
+      }
+      existing.count += 1;
+      existing.latestAt = existing.latestAt < log.createdAt ? log.createdAt : existing.latestAt;
+      existing.startedAt = existing.startedAt > log.createdAt ? log.createdAt : existing.startedAt;
+      existing.outcomes[log.outcome] = (existing.outcomes[log.outcome] ?? 0) + 1;
+      if (existing.actions.length < 10) {
+        existing.actions.push({
+          id: log.id,
+          action: log.action,
+          outcome: log.outcome,
+          resourceType: log.resourceType,
+          resourceId: log.resourceId,
+          createdAt: log.createdAt,
+        });
+      }
+    });
+
+    const groupRows = Array.from(groups.values()).map((group) => ({
+      ...group,
+      actions: group.actions.sort(
+        (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+      ),
+    }));
+
+    const allResourceIds = Array.from(
+      new Set(
+        groupRows.flatMap((group) =>
+          group.actions
+            .map((action) => action.resourceId)
+            .filter((resourceId): resourceId is string => Boolean(resourceId)),
+        ),
+      ),
+    );
+    const businessIds = Array.from(
+      new Set(groupRows.map((group) => group.businessId).filter(Boolean)),
+    );
+    const earliest = groupRows.reduce<Date | null>(
+      (min, row) => (!min || row.startedAt < min ? row.startedAt : min),
+      null,
+    );
+    const latest = groupRows.reduce<Date | null>(
+      (max, row) => (!max || row.latestAt > max ? row.latestAt : max),
+      null,
+    );
+    const from = earliest
+      ? new Date(earliest.getTime() - 10 * 60 * 1000)
+      : new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const to = latest
+      ? new Date(latest.getTime() + 10 * 60 * 1000)
+      : new Date();
+
+    const platformWhereOr: Prisma.PlatformAuditLogWhereInput[] = [];
+    if (allResourceIds.length) {
+      platformWhereOr.push({ resourceId: { in: allResourceIds } });
+    }
+    businessIds.forEach((businessId) => {
+      platformWhereOr.push({
+        metadata: {
+          path: ['businessId'],
+          equals: businessId,
+        },
+      });
+    });
+    const platformRows =
+      platformWhereOr.length > 0
+        ? await this.prisma.platformAuditLog.findMany({
+            where: {
+              createdAt: { gte: from, lte: to },
+              OR: platformWhereOr,
+            },
+            orderBy: [{ createdAt: 'desc' }],
+            take: 500,
+          })
+        : [];
+
+    const resolveMetadataBusinessId = (metadata: Prisma.JsonValue | null) => {
+      if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+        return null;
+      }
+      const value = (metadata as Record<string, unknown>).businessId;
+      return typeof value === 'string' && value.trim() ? value : null;
+    };
+
+    const items = groupRows.map((group) => {
+      const resourceSummary = group.actions.reduce<
+        Array<{ resourceType: string; resourceId: string | null; count: number }>
+      >((acc, action) => {
+        const key = `${action.resourceType}:${action.resourceId ?? 'none'}`;
+        const existing = acc.find(
+          (entry) =>
+            entry.resourceType === action.resourceType &&
+            entry.resourceId === (action.resourceId ?? null),
+        );
+        if (existing) {
+          existing.count += 1;
+          return acc;
+        }
+        acc.push({
+          resourceType: action.resourceType,
+          resourceId: action.resourceId ?? null,
+          count: 1,
+        });
+        return acc;
+      }, []);
+
+      const windowStart = new Date(group.startedAt.getTime() - 5 * 60 * 1000);
+      const windowEnd = new Date(group.latestAt.getTime() + 5 * 60 * 1000);
+      const groupResourceIds = new Set(
+        group.actions
+          .map((action) => action.resourceId)
+          .filter((value): value is string => Boolean(value)),
+      );
+      const relatedPlatformActions = platformRows
+        .filter((entry) => {
+          if (entry.createdAt < windowStart || entry.createdAt > windowEnd) {
+            return false;
+          }
+          const metadataBusinessId = resolveMetadataBusinessId(entry.metadata);
+          if (metadataBusinessId && metadataBusinessId === group.businessId) {
+            return true;
+          }
+          if (entry.resourceId && groupResourceIds.has(entry.resourceId)) {
+            return true;
+          }
+          return false;
+        })
+        .slice(0, 10)
+        .map((entry) => ({
+          id: entry.id,
+          action: entry.action,
+          resourceType: entry.resourceType,
+          resourceId: entry.resourceId,
+          reason: entry.reason,
+          createdAt: entry.createdAt.toISOString(),
+          metadata: entry.metadata,
+        }));
+
+      return {
+        id: group.id,
+        key: group.key,
+        groupType: group.groupType,
+        businessId: group.businessId,
+        startedAt: group.startedAt.toISOString(),
+        latestAt: group.latestAt.toISOString(),
+        count: group.count,
+        outcomes: group.outcomes,
+        actions: group.actions.map((action) => ({
+          ...action,
+          createdAt: action.createdAt.toISOString(),
+        })),
+        resourceSummary,
+        relatedPlatformActions,
+      };
+    });
+
+    const nextCursor = logs.length >= pagination.take ? logs[logs.length - 1]?.id ?? null : null;
+
+    return {
+      items,
+      nextCursor,
+    };
+  }
+
   async updateBusinessStatus(
     businessId: string,
     status: BusinessStatus,
     platformAdminId: string,
     reason?: string,
+    expectedUpdatedAt?: Date | null,
+    idempotencyKey?: string,
   ) {
     if (!reason) {
       throw new BadRequestException('Reason is required.');
     }
+    await this.assertBusinessConcurrency(businessId, expectedUpdatedAt);
+    const idem = await this.claimMutationIdempotency(
+      businessId,
+      'platform:business-status',
+      idempotencyKey,
+    );
     const before = await this.prisma.business.findUnique({
       where: { id: businessId },
     });
+    if (!before) {
+      throw new BadRequestException('Business not found.');
+    }
+    this.assertValidBusinessTransition(before.status, status);
     const updated = await this.prisma.business.update({
       where: { id: businessId },
       data: { status },
@@ -339,6 +1255,13 @@ export class PlatformService {
       reason,
       metadata: { status },
     });
+    if (idem) {
+      await finalizeIdempotency(this.prisma, idem.record.id, {
+        resourceType: 'Business',
+        resourceId: businessId,
+        metadata: { action: 'BUSINESS_STATUS_UPDATE', status },
+      });
+    }
     return updated;
   }
 
@@ -349,10 +1272,20 @@ export class PlatformService {
     confirmBusinessId?: string,
     confirmText?: string,
     dryRun?: boolean,
+    expectedUpdatedAt?: Date | null,
+    idempotencyKey?: string,
   ) {
     if (!reason) {
       throw new BadRequestException('Reason is required.');
     }
+    await this.assertBusinessConcurrency(businessId, expectedUpdatedAt);
+    const idem = dryRun
+      ? null
+      : await this.claimMutationIdempotency(
+          businessId,
+          'platform:business-purge',
+          idempotencyKey,
+        );
     if (!dryRun) {
       if (confirmBusinessId !== businessId) {
         throw new BadRequestException(
@@ -612,6 +1545,14 @@ export class PlatformService {
       },
     });
 
+    if (idem) {
+      await finalizeIdempotency(this.prisma, idem.record.id, {
+        resourceType: 'Business',
+        resourceId: businessId,
+        metadata: { action: 'BUSINESS_PURGE' },
+      });
+    }
+
     return { deleted: true };
   }
 
@@ -626,11 +1567,19 @@ export class PlatformService {
       graceEndsAt?: Date | null;
       expiresAt?: Date | null;
       reason?: string;
+      expectedUpdatedAt?: Date | null;
+      idempotencyKey?: string;
     },
   ) {
     if (!data.reason) {
       throw new BadRequestException('Reason is required.');
     }
+    await this.assertBusinessConcurrency(businessId, data.expectedUpdatedAt);
+    const idem = await this.claimMutationIdempotency(
+      businessId,
+      'platform:subscription-update',
+      data.idempotencyKey,
+    );
     const existing = await this.prisma.subscription.findUnique({
       where: { businessId },
     });
@@ -698,90 +1647,219 @@ export class PlatformService {
         expiresAt: data.expiresAt,
       },
     });
-    return Promise.all([existing, subscription]).then(([before, after]) => {
+    return Promise.all([existing, subscription]).then(async ([before, after]) => {
+      const sideEffects: Promise<unknown>[] = [];
+
       if (
         data.status &&
         (data.status === SubscriptionStatus.ACTIVE ||
           data.status === SubscriptionStatus.TRIAL)
       ) {
-        this.prisma.businessSettings.updateMany({
-          where: { businessId, readOnlyEnabled: true },
-          data: {
-            readOnlyEnabled: false,
-            readOnlyReason: null,
-            readOnlyEnabledAt: null,
-          },
-        });
+        sideEffects.push(
+          this.prisma.businessSettings.updateMany({
+            where: { businessId, readOnlyEnabled: true },
+            data: {
+              readOnlyEnabled: false,
+              readOnlyReason: null,
+              readOnlyEnabledAt: null,
+            },
+          }),
+        );
       }
+
       if (after.status === SubscriptionStatus.EXPIRED) {
-        this.prisma.offlineDevice.updateMany({
-          where: { businessId, status: 'ACTIVE' },
-          data: { status: 'REVOKED', revokedAt: new Date() },
-        });
+        sideEffects.push(
+          this.prisma.offlineDevice.updateMany({
+            where: { businessId, status: 'ACTIVE' },
+            data: { status: 'REVOKED', revokedAt: new Date() },
+          }),
+        );
       }
-      this.prisma.subscriptionHistory.create({
-        data: {
+
+      const businessStatusMap: Partial<Record<SubscriptionStatus, BusinessStatus>> =
+        {
+          [SubscriptionStatus.TRIAL]: BusinessStatus.TRIAL,
+          [SubscriptionStatus.ACTIVE]: BusinessStatus.ACTIVE,
+          [SubscriptionStatus.GRACE]: BusinessStatus.GRACE,
+          [SubscriptionStatus.EXPIRED]: BusinessStatus.EXPIRED,
+        };
+      const mappedBusinessStatus = data.status
+        ? businessStatusMap[data.status]
+        : undefined;
+      if (mappedBusinessStatus) {
+        sideEffects.push(
+          this.prisma.business.updateMany({
+            where: { id: businessId, status: { not: mappedBusinessStatus } },
+            data: { status: mappedBusinessStatus },
+          }),
+        );
+      }
+
+      sideEffects.push(
+        this.prisma.subscriptionHistory.create({
+          data: {
+            businessId,
+            previousStatus: before?.status ?? null,
+            newStatus: after.status,
+            previousTier: before?.tier ?? null,
+            newTier: after.tier,
+            changedByPlatformAdminId: data.platformAdminId,
+            reason: data.reason ?? null,
+            metadata: limitsPayload,
+          },
+        }),
+      );
+
+      sideEffects.push(
+        this.auditService.logEvent({
           businessId,
-          previousStatus: before?.status ?? null,
-          newStatus: after.status,
-          previousTier: before?.tier ?? null,
-          newTier: after.tier,
-          changedByPlatformAdminId: data.platformAdminId,
-          reason: data.reason ?? null,
-          metadata: limitsPayload,
-        },
-      });
-      this.auditService.logEvent({
-        businessId,
-        userId: data.platformAdminId,
-        action: 'SUBSCRIPTION_UPDATE',
-        resourceType: 'Subscription',
-        outcome: 'SUCCESS',
-        reason: data.reason ?? undefined,
-        metadata: {
-          ...data,
-          previousStatus: before?.status ?? null,
-          previousTier: before?.tier ?? null,
-        },
-        before: before as unknown as Record<string, unknown>,
-        after: after as unknown as Record<string, unknown>,
-      });
-      this.logPlatformAction({
-        platformAdminId: data.platformAdminId,
-        action: 'SUBSCRIPTION_UPDATE',
-        resourceType: 'Subscription',
-        resourceId: after.id,
-        businessId,
-        reason: data.reason ?? undefined,
-        metadata: {
-          status: after.status,
-          tier: after.tier,
-          previousStatus: before?.status ?? null,
-          previousTier: before?.tier ?? null,
-        },
-      });
+          userId: data.platformAdminId,
+          action: 'SUBSCRIPTION_UPDATE',
+          resourceType: 'Subscription',
+          outcome: 'SUCCESS',
+          reason: data.reason ?? undefined,
+          metadata: {
+            ...data,
+            previousStatus: before?.status ?? null,
+            previousTier: before?.tier ?? null,
+          },
+          before: before as unknown as Record<string, unknown>,
+          after: after as unknown as Record<string, unknown>,
+        }),
+      );
+
+      sideEffects.push(
+        this.logPlatformAction({
+          platformAdminId: data.platformAdminId,
+          action: 'SUBSCRIPTION_UPDATE',
+          resourceType: 'Subscription',
+          resourceId: after.id,
+          businessId,
+          reason: data.reason ?? undefined,
+          metadata: {
+            status: after.status,
+            tier: after.tier,
+            previousStatus: before?.status ?? null,
+            previousTier: before?.tier ?? null,
+          },
+        }),
+      );
 
       if (
         data.status === SubscriptionStatus.GRACE &&
         before?.status !== SubscriptionStatus.GRACE
       ) {
         const graceEndsAt = data.graceEndsAt ?? before?.graceEndsAt ?? null;
-        this.notificationsService.notifyEvent({
-          businessId,
-          eventKey: 'graceWarnings',
-          title: 'Subscription in grace period',
-          message: graceEndsAt
-            ? `Your subscription is in grace period until ${graceEndsAt.toDateString()}.`
-            : 'Your subscription is in grace period. Please update billing.',
-          priority: 'WARNING',
+        sideEffects.push(
+          this.notificationsService.notifyEvent({
+            businessId,
+            eventKey: 'graceWarnings',
+            title: 'Subscription in grace period',
+            message: graceEndsAt
+              ? `Your subscription is in grace period until ${graceEndsAt.toDateString()}.`
+              : 'Your subscription is in grace period. Please update billing.',
+            priority: 'WARNING',
+            metadata: {
+              graceEndsAt: graceEndsAt?.toISOString() ?? null,
+            },
+          }),
+        );
+      }
+
+      await Promise.all(sideEffects);
+
+      if (idem) {
+        await finalizeIdempotency(this.prisma, idem.record.id, {
+          resourceType: 'Subscription',
+          resourceId: after.id,
           metadata: {
-            graceEndsAt: graceEndsAt?.toISOString() ?? null,
+            action: 'SUBSCRIPTION_UPDATE',
+            status: after.status,
+            tier: after.tier,
           },
         });
       }
 
       return after;
     });
+  }
+
+  async recordSubscriptionPurchase(data: {
+    businessId: string;
+    platformAdminId: string;
+    tier: SubscriptionTier;
+    durationDays: number;
+    startsAt?: Date | null;
+    reason?: string;
+    expectedUpdatedAt?: Date | null;
+    idempotencyKey?: string;
+  }) {
+    if (!data.reason?.trim()) {
+      throw new BadRequestException('Reason is required.');
+    }
+    const durationDays = Number(data.durationDays);
+    if (!Number.isFinite(durationDays) || durationDays <= 0) {
+      throw new BadRequestException('Duration days must be greater than zero.');
+    }
+    const baseStart = data.startsAt ?? new Date();
+    if (Number.isNaN(baseStart.getTime())) {
+      throw new BadRequestException('Invalid start date.');
+    }
+
+    const business = await this.prisma.business.findUnique({
+      where: { id: data.businessId },
+      select: { id: true, status: true },
+    });
+    if (!business) {
+      throw new BadRequestException('Business not found.');
+    }
+
+    if (business.status !== BusinessStatus.ACTIVE) {
+      this.assertValidBusinessTransition(business.status, BusinessStatus.ACTIVE);
+      await this.updateBusinessStatus(
+        data.businessId,
+        BusinessStatus.ACTIVE,
+        data.platformAdminId,
+        data.reason,
+        data.expectedUpdatedAt ?? null,
+        data.idempotencyKey,
+      );
+    }
+
+    const graceDays = parseInt(
+      this.configService.get<string>('subscription.graceDays') ?? '7',
+      10,
+    );
+    const expiresAt = new Date(
+      baseStart.getTime() + durationDays * 24 * 60 * 60 * 1000,
+    );
+    const graceEndsAt =
+      graceDays > 0
+        ? new Date(expiresAt.getTime() + graceDays * 24 * 60 * 60 * 1000)
+        : null;
+
+    const subscription = await this.updateSubscription(data.businessId, {
+      platformAdminId: data.platformAdminId,
+      tier: data.tier,
+      status: SubscriptionStatus.ACTIVE,
+      trialEndsAt: null,
+      graceEndsAt,
+      expiresAt,
+      reason: data.reason,
+      expectedUpdatedAt: data.expectedUpdatedAt ?? null,
+      idempotencyKey: data.idempotencyKey,
+    });
+
+    return {
+      subscription,
+      lifecycle: {
+        startsAt: baseStart.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+        graceEndsAt: graceEndsAt?.toISOString() ?? null,
+        durationDays,
+        tier: data.tier,
+      },
+    };
   }
 
   async requestExportOnExit(data: {
@@ -825,11 +1903,23 @@ export class PlatformService {
 
   async updateReadOnly(
     businessId: string,
-    data: { enabled: boolean; reason?: string | null; platformAdminId: string },
+    data: {
+      enabled: boolean;
+      reason?: string | null;
+      platformAdminId: string;
+      expectedUpdatedAt?: Date | null;
+      idempotencyKey?: string;
+    },
   ) {
     if (data.enabled && !data.reason) {
       throw new BadRequestException('Reason is required.');
     }
+    await this.assertBusinessConcurrency(businessId, data.expectedUpdatedAt);
+    const idem = await this.claimMutationIdempotency(
+      businessId,
+      'platform:readonly-update',
+      data.idempotencyKey,
+    );
     const existing = await this.prisma.businessSettings.findUnique({
       where: { businessId },
     });
@@ -879,6 +1969,13 @@ export class PlatformService {
       reason: nextReason ?? undefined,
       metadata: { businessId, enabled: data.enabled },
     });
+    if (idem) {
+      await finalizeIdempotency(this.prisma, idem.record.id, {
+        resourceType: 'BusinessSettings',
+        resourceId: updated.id,
+        metadata: { action: 'READ_ONLY_UPDATE', enabled: data.enabled },
+      });
+    }
     return updated;
   }
 
@@ -921,6 +2018,206 @@ export class PlatformService {
         ...pagination,
       })
       .then((items) => buildPaginatedResponse(items, pagination.take));
+  }
+
+  async getExportQueueStats(query: {
+    businessId?: string;
+    type?: string;
+  } = {}) {
+    const where: Prisma.ExportJobWhereInput = {
+      ...(query.businessId ? { businessId: query.businessId } : {}),
+      ...(query.type ? { type: query.type as ExportJobType } : {}),
+    };
+    const [byStatusRows, byTypeRows] = await Promise.all([
+      this.prisma.exportJob.groupBy({
+        by: ['status'],
+        where,
+        _count: { _all: true },
+      }),
+      this.prisma.exportJob.groupBy({
+        by: ['type', 'status'],
+        where,
+        _count: { _all: true },
+      }),
+    ]);
+    const byStatus = byStatusRows.reduce<Record<string, number>>((acc, row) => {
+      acc[row.status] = row._count._all;
+      return acc;
+    }, {});
+    const byType = byTypeRows.reduce<
+      Record<string, { total: number; byStatus: Record<string, number> }>
+    >((acc, row) => {
+      if (!acc[row.type]) {
+        acc[row.type] = { total: 0, byStatus: {} };
+      }
+      acc[row.type].total += row._count._all;
+      acc[row.type].byStatus[row.status] = row._count._all;
+      return acc;
+    }, {});
+    const total = Object.values(byStatus).reduce((sum, value) => sum + value, 0);
+    return {
+      total,
+      byStatus,
+      byType,
+    };
+  }
+
+  async cancelExportJob(data: {
+    exportJobId: string;
+    platformAdminId: string;
+    reason?: string;
+  }) {
+    const existing = await this.prisma.exportJob.findUnique({
+      where: { id: data.exportJobId },
+    });
+    if (!existing) {
+      throw new BadRequestException('Export job not found.');
+    }
+    if (existing.status !== ExportJobStatus.PENDING) {
+      throw new BadRequestException(
+        'Only PENDING export jobs can be canceled.',
+      );
+    }
+    const now = new Date();
+    const updated = await this.prisma.exportJob.update({
+      where: { id: data.exportJobId },
+      data: {
+        status: ExportJobStatus.CANCELED,
+        completedAt: now,
+        lastError: null,
+      },
+    });
+    await this.auditService.logEvent({
+      businessId: existing.businessId,
+      userId: data.platformAdminId,
+      action: 'EXPORT_CANCEL',
+      resourceType: 'ExportJob',
+      resourceId: existing.id,
+      outcome: 'SUCCESS',
+      reason: data.reason ?? undefined,
+      metadata: {
+        fromStatus: existing.status,
+        toStatus: updated.status,
+      },
+      before: existing as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+    });
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'EXPORT_CANCEL',
+      resourceType: 'ExportJob',
+      resourceId: existing.id,
+      businessId: existing.businessId,
+      reason: data.reason ?? undefined,
+      metadata: { businessId: existing.businessId },
+    });
+    return updated;
+  }
+
+  async retryExportJob(data: {
+    exportJobId: string;
+    platformAdminId: string;
+    reason?: string;
+  }) {
+    const existing = await this.prisma.exportJob.findUnique({
+      where: { id: data.exportJobId },
+    });
+    if (!existing) {
+      throw new BadRequestException('Export job not found.');
+    }
+    if (existing.status !== ExportJobStatus.FAILED) {
+      throw new BadRequestException('Only FAILED export jobs can be retried.');
+    }
+    const updated = await this.prisma.exportJob.update({
+      where: { id: data.exportJobId },
+      data: {
+        status: ExportJobStatus.PENDING,
+        attempts: 0,
+        startedAt: null,
+        completedAt: null,
+        lastError: null,
+        deliveredAt: null,
+        deliveredByPlatformAdminId: null,
+      },
+    });
+    await this.auditService.logEvent({
+      businessId: existing.businessId,
+      userId: data.platformAdminId,
+      action: 'EXPORT_RETRY',
+      resourceType: 'ExportJob',
+      resourceId: existing.id,
+      outcome: 'SUCCESS',
+      reason: data.reason ?? undefined,
+      metadata: {
+        fromStatus: existing.status,
+        toStatus: updated.status,
+      },
+      before: existing as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+    });
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'EXPORT_RETRY',
+      resourceType: 'ExportJob',
+      resourceId: existing.id,
+      businessId: existing.businessId,
+      reason: data.reason ?? undefined,
+      metadata: { businessId: existing.businessId },
+    });
+    return updated;
+  }
+
+  async requeueExportJob(data: {
+    exportJobId: string;
+    platformAdminId: string;
+    reason?: string;
+  }) {
+    const existing = await this.prisma.exportJob.findUnique({
+      where: { id: data.exportJobId },
+    });
+    if (!existing) {
+      throw new BadRequestException('Export job not found.');
+    }
+    if (existing.status === ExportJobStatus.RUNNING) {
+      throw new BadRequestException('RUNNING export jobs cannot be requeued.');
+    }
+    const updated = await this.prisma.exportJob.update({
+      where: { id: data.exportJobId },
+      data: {
+        status: ExportJobStatus.PENDING,
+        attempts: 0,
+        startedAt: null,
+        completedAt: null,
+        lastError: null,
+        deliveredAt: null,
+        deliveredByPlatformAdminId: null,
+      },
+    });
+    await this.auditService.logEvent({
+      businessId: existing.businessId,
+      userId: data.platformAdminId,
+      action: 'EXPORT_REQUEUE',
+      resourceType: 'ExportJob',
+      resourceId: existing.id,
+      outcome: 'SUCCESS',
+      reason: data.reason ?? undefined,
+      metadata: {
+        fromStatus: existing.status,
+        toStatus: updated.status,
+      },
+      before: existing as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+    });
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'EXPORT_REQUEUE',
+      resourceType: 'ExportJob',
+      resourceId: existing.id,
+      businessId: existing.businessId,
+      reason: data.reason ?? undefined,
+      metadata: { businessId: existing.businessId },
+    });
+    return updated;
   }
 
   async approveSubscriptionRequest(data: {
@@ -1105,16 +2402,258 @@ export class PlatformService {
     return updated;
   }
 
+  async listIncidents(
+    query: PaginationQuery & {
+      businessId?: string;
+      status?: string;
+      severity?: string;
+    } = {},
+  ) {
+    const pagination = parsePagination(query, 50, 200);
+    return this.prisma.platformIncident
+      .findMany({
+        where: {
+          ...(query.businessId ? { businessId: query.businessId } : {}),
+          ...(query.status
+            ? { status: query.status as PlatformIncidentStatus }
+            : {}),
+          ...(query.severity
+            ? { severity: query.severity as PlatformIncidentSeverity }
+            : {}),
+        },
+        include: {
+          business: { select: { name: true } },
+          events: {
+            orderBy: { createdAt: 'desc' },
+            take: 5,
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        ...pagination,
+      })
+      .then((items) => buildPaginatedResponse(items, pagination.take));
+  }
+
+  async createIncident(data: {
+    businessId: string;
+    reason: string;
+    title?: string;
+    severity?: PlatformIncidentSeverity;
+    ownerPlatformAdminId?: string;
+    metadata?: Record<string, unknown>;
+    platformAdminId: string;
+  }) {
+    if (!data.reason?.trim()) {
+      throw new BadRequestException('Reason is required.');
+    }
+    const incident = await this.prisma.platformIncident.create({
+      data: {
+        businessId: data.businessId,
+        reason: data.reason,
+        title: data.title ?? null,
+        severity: data.severity ?? PlatformIncidentSeverity.MEDIUM,
+        status: PlatformIncidentStatus.OPEN,
+        source: 'MANUAL',
+        ownerPlatformAdminId: data.ownerPlatformAdminId ?? null,
+        createdByPlatformAdminId: data.platformAdminId,
+        metadata: data.metadata
+          ? (data.metadata as Prisma.InputJsonValue)
+          : undefined,
+      },
+    });
+    await this.createIncidentEvent({
+      incidentId: incident.id,
+      eventType: 'CREATED',
+      createdByAdminId: data.platformAdminId,
+      note: data.reason,
+      toStatus: PlatformIncidentStatus.OPEN,
+      metadata: { source: 'MANUAL' },
+    });
+    await this.syncBusinessReviewFromIncidents(data.businessId);
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'PLATFORM_INCIDENT_CREATE',
+      resourceType: 'PlatformIncident',
+      resourceId: incident.id,
+      businessId: data.businessId,
+      reason: data.reason,
+      metadata: {
+        severity: incident.severity,
+        status: incident.status,
+      },
+    });
+    return incident;
+  }
+
+  async updateIncident(data: {
+    incidentId: string;
+    platformAdminId: string;
+    title?: string;
+    reason?: string;
+    severity?: PlatformIncidentSeverity;
+    ownerPlatformAdminId?: string | null;
+    status?: PlatformIncidentStatus;
+  }) {
+    const existing = await this.prisma.platformIncident.findUnique({
+      where: { id: data.incidentId },
+    });
+    if (!existing) {
+      throw new BadRequestException('Incident not found.');
+    }
+    if (data.status && data.status !== existing.status) {
+      this.assertValidIncidentTransition(existing.status, data.status);
+    }
+    const nextStatus = data.status ?? existing.status;
+    const updated = await this.prisma.platformIncident.update({
+      where: { id: data.incidentId },
+      data: {
+        title: data.title,
+        reason: data.reason,
+        severity: data.severity,
+        ownerPlatformAdminId: data.ownerPlatformAdminId,
+        status: data.status,
+        closedAt:
+          nextStatus === PlatformIncidentStatus.CLOSED
+            ? new Date()
+            : nextStatus === PlatformIncidentStatus.RESOLVED
+              ? existing.closedAt
+              : null,
+      },
+    });
+
+    await this.createIncidentEvent({
+      incidentId: existing.id,
+      eventType: 'UPDATED',
+      createdByAdminId: data.platformAdminId,
+      fromStatus: existing.status,
+      toStatus: nextStatus,
+      metadata: {
+        title: data.title,
+        reason: data.reason,
+        severity: data.severity,
+        ownerPlatformAdminId: data.ownerPlatformAdminId,
+      },
+    });
+    await this.syncBusinessReviewFromIncidents(existing.businessId);
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'PLATFORM_INCIDENT_UPDATE',
+      resourceType: 'PlatformIncident',
+      resourceId: existing.id,
+      businessId: existing.businessId,
+      reason: data.reason ?? undefined,
+      metadata: {
+        fromStatus: existing.status,
+        toStatus: nextStatus,
+        severity: updated.severity,
+      },
+    });
+    return updated;
+  }
+
+  async transitionIncident(data: {
+    incidentId: string;
+    platformAdminId: string;
+    toStatus: PlatformIncidentStatus;
+    reason: string;
+    note?: string;
+  }) {
+    if (!data.reason?.trim()) {
+      throw new BadRequestException('Reason is required.');
+    }
+    const incident = await this.prisma.platformIncident.findUnique({
+      where: { id: data.incidentId },
+    });
+    if (!incident) {
+      throw new BadRequestException('Incident not found.');
+    }
+    this.assertValidIncidentTransition(incident.status, data.toStatus);
+    const updated = await this.prisma.platformIncident.update({
+      where: { id: incident.id },
+      data: {
+        status: data.toStatus,
+        closedAt:
+          data.toStatus === PlatformIncidentStatus.CLOSED ? new Date() : null,
+        reason: data.reason,
+      },
+    });
+    await this.createIncidentEvent({
+      incidentId: incident.id,
+      eventType: 'TRANSITION',
+      createdByAdminId: data.platformAdminId,
+      note: data.note ?? data.reason,
+      fromStatus: incident.status,
+      toStatus: data.toStatus,
+      metadata: { reason: data.reason },
+    });
+    await this.syncBusinessReviewFromIncidents(incident.businessId);
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'PLATFORM_INCIDENT_TRANSITION',
+      resourceType: 'PlatformIncident',
+      resourceId: incident.id,
+      businessId: incident.businessId,
+      reason: data.reason,
+      metadata: {
+        fromStatus: incident.status,
+        toStatus: data.toStatus,
+      },
+    });
+    return updated;
+  }
+
+  async addIncidentNote(data: {
+    incidentId: string;
+    platformAdminId: string;
+    note: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    if (!data.note?.trim()) {
+      throw new BadRequestException('Note is required.');
+    }
+    const incident = await this.prisma.platformIncident.findUnique({
+      where: { id: data.incidentId },
+    });
+    if (!incident) {
+      throw new BadRequestException('Incident not found.');
+    }
+    const event = await this.createIncidentEvent({
+      incidentId: incident.id,
+      eventType: 'NOTE',
+      createdByAdminId: data.platformAdminId,
+      note: data.note,
+      metadata: data.metadata,
+    });
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'PLATFORM_INCIDENT_NOTE',
+      resourceType: 'PlatformIncident',
+      resourceId: incident.id,
+      businessId: incident.businessId,
+      reason: data.note,
+      metadata: data.metadata,
+    });
+    return event;
+  }
+
   async updateBusinessReview(data: {
     businessId: string;
     underReview: boolean;
     reason: string;
     severity?: string;
     platformAdminId: string;
+    expectedUpdatedAt?: Date | null;
+    idempotencyKey?: string;
   }) {
     if (!data.reason) {
       throw new BadRequestException('Reason is required.');
     }
+    await this.assertBusinessConcurrency(data.businessId, data.expectedUpdatedAt);
+    const idem = await this.claimMutationIdempotency(
+      data.businessId,
+      'platform:review-update',
+      data.idempotencyKey,
+    );
     const before = await this.prisma.business.findUnique({
       where: { id: data.businessId },
     });
@@ -1150,6 +2689,81 @@ export class PlatformService {
         severity: data.severity ?? null,
       },
     });
+
+    if (data.underReview) {
+      const legacyIncident = await this.prisma.platformIncident.create({
+        data: {
+          businessId: data.businessId,
+          status: PlatformIncidentStatus.OPEN,
+          severity:
+            (data.severity as PlatformIncidentSeverity | undefined) ??
+            PlatformIncidentSeverity.MEDIUM,
+          reason: data.reason,
+          title: 'Legacy review flag',
+          source: 'LEGACY_REVIEW',
+          createdByPlatformAdminId: data.platformAdminId,
+          metadata: {
+            sourceAction: 'BUSINESS_REVIEW_UPDATE',
+          } as Prisma.InputJsonValue,
+        },
+      });
+      await this.createIncidentEvent({
+        incidentId: legacyIncident.id,
+        eventType: 'LEGACY_FLAG_SET',
+        createdByAdminId: data.platformAdminId,
+        toStatus: PlatformIncidentStatus.OPEN,
+        note: data.reason,
+        metadata: {
+          severity:
+            (data.severity as PlatformIncidentSeverity | undefined) ?? 'MEDIUM',
+        },
+      });
+    } else {
+      const active = await this.prisma.platformIncident.findFirst({
+        where: {
+          businessId: data.businessId,
+          status: {
+            in: [
+              PlatformIncidentStatus.OPEN,
+              PlatformIncidentStatus.INVESTIGATING,
+              PlatformIncidentStatus.MITIGATED,
+            ],
+          },
+        },
+        orderBy: { updatedAt: 'desc' },
+      });
+      if (active) {
+        await this.prisma.platformIncident.update({
+          where: { id: active.id },
+          data: {
+            status: PlatformIncidentStatus.RESOLVED,
+            closedAt: active.closedAt ?? new Date(),
+            reason: data.reason,
+          },
+        });
+        await this.createIncidentEvent({
+          incidentId: active.id,
+          eventType: 'LEGACY_FLAG_CLEARED',
+          createdByAdminId: data.platformAdminId,
+          fromStatus: active.status,
+          toStatus: PlatformIncidentStatus.RESOLVED,
+          note: data.reason,
+        });
+      }
+    }
+
+    await this.syncBusinessReviewFromIncidents(data.businessId);
+
+    if (idem) {
+      await finalizeIdempotency(this.prisma, idem.record.id, {
+        resourceType: 'Business',
+        resourceId: data.businessId,
+        metadata: {
+          action: 'BUSINESS_REVIEW_UPDATE',
+          underReview: data.underReview,
+        },
+      });
+    }
     return updated;
   }
 
@@ -1157,10 +2771,18 @@ export class PlatformService {
     businessId: string;
     platformAdminId: string;
     reason: string;
+    expectedUpdatedAt?: Date | null;
+    idempotencyKey?: string;
   }) {
     if (!data.reason) {
       throw new BadRequestException('Reason is required.');
     }
+    await this.assertBusinessConcurrency(data.businessId, data.expectedUpdatedAt);
+    const idem = await this.claimMutationIdempotency(
+      data.businessId,
+      'platform:revoke-sessions',
+      data.idempotencyKey,
+    );
     const users = await this.prisma.businessUser.findMany({
       where: { businessId: data.businessId },
       select: { userId: true },
@@ -1183,6 +2805,13 @@ export class PlatformService {
       reason: data.reason,
       metadata: { revokedCount: result.count },
     });
+    if (idem) {
+      await finalizeIdempotency(this.prisma, idem.record.id, {
+        resourceType: 'Business',
+        resourceId: data.businessId,
+        metadata: { action: 'BUSINESS_FORCE_LOGOUT', revokedCount: result.count },
+      });
+    }
     return { revokedCount: result.count };
   }
 
@@ -1193,10 +2822,18 @@ export class PlatformService {
     ttlSeconds: number | null;
     expiresAt?: Date | null;
     reason: string;
+    expectedUpdatedAt?: Date | null;
+    idempotencyKey?: string;
   }) {
     if (!data.reason) {
       throw new BadRequestException('Reason is required.');
     }
+    await this.assertBusinessConcurrency(data.businessId, data.expectedUpdatedAt);
+    const idem = await this.claimMutationIdempotency(
+      data.businessId,
+      'platform:rate-limit-update',
+      data.idempotencyKey,
+    );
     const override = {
       limit: data.limit,
       ttlSeconds: data.ttlSeconds,
@@ -1236,7 +2873,121 @@ export class PlatformService {
       reason: data.reason,
       metadata: { businessId: data.businessId, ...override },
     });
+    if (idem) {
+      await finalizeIdempotency(this.prisma, idem.record.id, {
+        resourceType: 'BusinessSettings',
+        resourceId: settings.id,
+        metadata: { action: 'RATE_LIMIT_OVERRIDE' },
+      });
+    }
     return settings;
+  }
+
+  async getBusinessActionPreflight(businessId: string, action: string) {
+    const normalizedAction = action.trim().toUpperCase();
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId },
+      include: {
+        subscription: true,
+        settings: {
+          select: {
+            readOnlyEnabled: true,
+            readOnlyReason: true,
+          },
+        },
+      },
+    });
+    if (!business) {
+      throw new BadRequestException('Business not found.');
+    }
+
+    const [pendingExports, activeDevices, failedOfflineActions, members] =
+      await Promise.all([
+        this.prisma.exportJob.count({
+          where: { businessId, status: 'PENDING' },
+        }),
+        this.prisma.offlineDevice.count({
+          where: { businessId, status: 'ACTIVE' },
+        }),
+        this.prisma.offlineAction.count({
+          where: { businessId, status: 'FAILED' },
+        }),
+        this.prisma.businessUser.count({ where: { businessId } }),
+      ]);
+
+    const preconditions: Array<{
+      code: string;
+      ok: boolean;
+      message: string;
+    }> = [];
+
+    if (normalizedAction === 'PURGE') {
+      preconditions.push({
+        code: 'BUSINESS_ARCHIVED',
+        ok: ['ARCHIVED', 'DELETED'].includes(business.status),
+        message:
+          business.status === 'ARCHIVED' || business.status === 'DELETED'
+            ? 'Business status allows purge.'
+            : 'Business must be archived before purge.',
+      });
+    }
+
+    if (normalizedAction === 'DELETE') {
+      preconditions.push({
+        code: 'FROM_ARCHIVED_ONLY',
+        ok: business.status === 'ARCHIVED',
+        message:
+          business.status === 'ARCHIVED'
+            ? 'Business can transition to DELETED.'
+            : 'Business must be ARCHIVED before DELETED transition.',
+      });
+    }
+
+    if (normalizedAction === 'ARCHIVE') {
+      preconditions.push({
+        code: 'NOT_ALREADY_DELETED',
+        ok: business.status !== 'DELETED',
+        message:
+          business.status === 'DELETED'
+            ? 'Deleted business cannot be archived.'
+            : 'Business can be archived.',
+      });
+    }
+
+    return {
+      action: normalizedAction,
+      business: {
+        id: business.id,
+        name: business.name,
+        status: business.status,
+        updatedAt: business.updatedAt.toISOString(),
+      },
+      impact: {
+        users: members,
+        pendingExports,
+        activeDevices,
+        failedOfflineActions,
+        currentStatus: business.status,
+        readOnlyEnabled: business.settings?.readOnlyEnabled ?? false,
+        subscriptionStatus: business.subscription?.status ?? null,
+      },
+      preconditions,
+      ready: preconditions.every((condition) => condition.ok),
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async getPurgePreflight(businessId: string, reason?: string) {
+    return this.purgeBusiness(
+      businessId,
+      'platform-preflight',
+      reason ?? 'Purge preflight',
+      businessId,
+      'DELETE',
+      true,
+      null,
+      undefined,
+    );
   }
 
   async listSubscriptionHistory(businessId: string) {
@@ -1376,6 +3127,128 @@ export class PlatformService {
       action: 'created',
     });
     return announcement;
+  }
+
+  async previewAnnouncementAudience(data: {
+    targetBusinessIds?: string[];
+    targetTiers?: string[];
+    targetStatuses?: string[];
+  }) {
+    const businessTargets = Array.from(
+      new Set((data.targetBusinessIds ?? []).filter(Boolean)),
+    );
+    const tierTargets = Array.from(
+      new Set((data.targetTiers ?? []).filter(Boolean)),
+    );
+    const statusTargets = Array.from(
+      new Set((data.targetStatuses ?? []).filter(Boolean)),
+    );
+    const explicitBusinesses = businessTargets.length
+      ? await this.prisma.business.findMany({
+          where: { id: { in: businessTargets } },
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            subscription: {
+              select: {
+                tier: true,
+                status: true,
+              },
+            },
+          },
+        })
+      : [];
+
+    const subscriptionFilter: Prisma.SubscriptionWhereInput = {};
+    if (tierTargets.length) {
+      subscriptionFilter.tier = { in: tierTargets as SubscriptionTier[] };
+    }
+    if (statusTargets.length) {
+      subscriptionFilter.status = {
+        in: statusTargets as SubscriptionStatus[],
+      };
+    }
+    const hasSegmentFilter = Boolean(tierTargets.length || statusTargets.length);
+    const segmentBusinesses = hasSegmentFilter
+      ? await this.prisma.business.findMany({
+          where: {
+            subscription: {
+              is: subscriptionFilter,
+            },
+          },
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            subscription: {
+              select: {
+                tier: true,
+                status: true,
+              },
+            },
+          },
+        })
+      : businessTargets.length
+        ? []
+        : await this.prisma.business.findMany({
+            select: {
+              id: true,
+              name: true,
+              status: true,
+              subscription: {
+                select: {
+                  tier: true,
+                  status: true,
+                },
+              },
+            },
+          });
+
+    const combinedMap = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        status: BusinessStatus;
+        subscription: {
+          tier: SubscriptionTier;
+          status: SubscriptionStatus;
+        } | null;
+      }
+    >();
+    explicitBusinesses.forEach((business) => {
+      combinedMap.set(business.id, business);
+    });
+    segmentBusinesses.forEach((business) => {
+      combinedMap.set(business.id, business);
+    });
+
+    const sampleBusinesses = Array.from(combinedMap.values())
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 20)
+      .map((business) => ({
+        id: business.id,
+        name: business.name,
+        businessStatus: business.status,
+        subscriptionTier: business.subscription?.tier ?? null,
+        subscriptionStatus: business.subscription?.status ?? null,
+      }));
+
+    return {
+      estimatedReach: {
+        total: combinedMap.size,
+        explicit: explicitBusinesses.length,
+        segment: segmentBusinesses.length,
+      },
+      filters: {
+        hasBroadcastScope: !businessTargets.length && !hasSegmentFilter,
+        targetBusinessIds: businessTargets,
+        targetTiers: tierTargets,
+        targetStatuses: statusTargets,
+      },
+      sampleBusinesses,
+    };
   }
 
   async listAnnouncements() {
@@ -1595,20 +3468,34 @@ export class PlatformService {
     });
 
     const slowEndpoints = metricsRows.reduce<
-      Record<string, { total: number; count: number }>
+      Record<string, { durations: number[]; errors: number; count: number }>
     >((acc, row) => {
-      acc[row.path] = acc[row.path] ?? { total: 0, count: 0 };
-      acc[row.path].total += row.durationMs;
+      acc[row.path] = acc[row.path] ?? { durations: [], errors: 0, count: 0 };
+      acc[row.path].durations.push(row.durationMs);
+      if (row.statusCode >= 400) {
+        acc[row.path].errors += 1;
+      }
       acc[row.path].count += 1;
       return acc;
     }, {});
     const slowest = Object.entries(slowEndpoints)
       .map(([path, value]) => ({
         path,
-        avgDurationMs: Math.round(value.total / value.count),
+        avgDurationMs: Math.round(
+          value.durations.reduce((sum, duration) => sum + duration, 0) /
+            Math.max(1, value.count),
+        ),
+        p95DurationMs: this.percentile(value.durations, 95),
+        p99DurationMs: this.percentile(value.durations, 99),
         count: value.count,
+        errorRate: value.count > 0 ? value.errors / value.count : 0,
       }))
-      .sort((a, b) => b.avgDurationMs - a.avgDurationMs)
+      .sort(
+        (a, b) =>
+          b.p95DurationMs - a.p95DurationMs ||
+          b.p99DurationMs - a.p99DurationMs ||
+          b.avgDurationMs - a.avgDurationMs,
+      )
       .slice(0, 5);
 
     const offlineEnabled = await this.prisma.offlineDevice.count({
@@ -1656,6 +3543,7 @@ export class PlatformService {
         pending: exportRows.length,
       },
       api: {
+        totalRequests: metricsRows.length,
         errorRate:
           metricsRows.length > 0
             ? metricsRows.filter((row) => row.statusCode >= 400).length /
@@ -1666,6 +3554,20 @@ export class PlatformService {
             ? Math.round(
                 metricsRows.reduce((sum, row) => sum + row.durationMs, 0) /
                   metricsRows.length,
+              )
+            : 0,
+        p95Latency:
+          metricsRows.length > 0
+            ? this.percentile(
+                metricsRows.map((row) => row.durationMs),
+                95,
+              )
+            : 0,
+        p99Latency:
+          metricsRows.length > 0
+            ? this.percentile(
+                metricsRows.map((row) => row.durationMs),
+                99,
               )
             : 0,
         slowEndpoints: slowest,

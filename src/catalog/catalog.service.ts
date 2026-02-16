@@ -163,15 +163,13 @@ export class CatalogService {
 
   async createProduct(
     businessId: string,
-    data: { name: string; description?: string; categoryId?: string },
+    data: { name: string; description?: string; categoryId: string },
   ) {
-    if (data.categoryId) {
-      const category = await this.prisma.category.findFirst({
-        where: { id: data.categoryId, businessId },
-      });
-      if (!category) {
-        return null;
-      }
+    const category = await this.prisma.category.findFirst({
+      where: { id: data.categoryId, businessId },
+    });
+    if (!category) {
+      return null;
     }
     await this.subscriptionService.assertLimit(businessId, 'products');
     const result = await this.prisma.product.create({

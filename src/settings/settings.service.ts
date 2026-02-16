@@ -369,6 +369,19 @@ export class SettingsService {
       (mergedOnboarding as Record<string, boolean>).branchSetupComplete
         ? (existing.onboardingCompletedAt ?? new Date())
         : (existing.onboardingCompletedAt ?? null);
+    if (
+      mergedOnboarding &&
+      (mergedOnboarding as Record<string, boolean>).branchSetupComplete
+    ) {
+      const branchCount = await this.prisma.branch.count({
+        where: { businessId, status: { not: 'ARCHIVED' } },
+      });
+      if (branchCount < 1) {
+        throw new BadRequestException(
+          'At least one branch is required before completing onboarding.',
+        );
+      }
+    }
 
     const nextNotificationDefaults = this.mergeNotificationDefaults(
       (data.notificationDefaults ?? existing.notificationDefaults) as Record<

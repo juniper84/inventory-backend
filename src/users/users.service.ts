@@ -26,6 +26,22 @@ export class UsersService {
     private readonly configService: ConfigService,
   ) {}
 
+  private normalizeUserNotificationPreferences(
+    raw: Record<string, unknown> | null | undefined,
+  ) {
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (raw === null || typeof raw !== 'object') {
+      return null;
+    }
+    const next = { ...raw } as Record<string, unknown>;
+    if (next.locale !== undefined) {
+      next.locale = next.locale === 'sw' ? 'sw' : 'en';
+    }
+    return next;
+  }
+
   async list(
     businessId: string,
     query: PaginationQuery & {
@@ -201,7 +217,9 @@ export class UsersService {
         notificationPreferences:
           data.notificationPreferences === undefined
             ? undefined
-            : (data.notificationPreferences as any),
+            : (this.normalizeUserNotificationPreferences(
+                data.notificationPreferences,
+              ) as any),
         status: data.status as any,
       },
     });

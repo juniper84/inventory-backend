@@ -15,6 +15,10 @@ import { PlatformService } from './platform.service';
 import { PlatformGuard } from './platform.guard';
 import {
   BusinessStatus,
+  PlatformIncidentSeverity,
+  PlatformIncidentStatus,
+  SupportRequestPriority,
+  SupportRequestSeverity,
   SubscriptionStatus,
   SubscriptionTier,
 } from '@prisma/client';
@@ -93,6 +97,69 @@ export class PlatformController {
     );
   }
 
+  @Get('overview/snapshot')
+  @UseGuards(PlatformGuard)
+  getOverviewSnapshot(
+    @Query()
+    query: {
+      range?: string;
+      from?: string;
+      to?: string;
+    },
+  ) {
+    return this.platformService.getOverviewSnapshot({
+      range: (query.range as any) ?? '24h',
+      from: query.from ? new Date(query.from) : null,
+      to: query.to ? new Date(query.to) : null,
+    });
+  }
+
+  @Get('health/matrix')
+  @UseGuards(PlatformGuard)
+  getHealthMatrix() {
+    return this.platformService.getHealthMatrix();
+  }
+
+  @Get('queues/summary')
+  @UseGuards(PlatformGuard)
+  getQueuesSummary() {
+    return this.platformService.getQueuesSummary();
+  }
+
+  @Get('businesses/:businessId/workspace')
+  @UseGuards(PlatformGuard)
+  getBusinessWorkspace(@Param('businessId') businessId: string) {
+    return this.platformService.getBusinessWorkspace(businessId);
+  }
+
+  @Post('businesses/:businessId/actions/:action/preflight')
+  @UseGuards(PlatformGuard)
+  getBusinessActionPreflight(
+    @Param('businessId') businessId: string,
+    @Param('action') action: string,
+  ) {
+    return this.platformService.getBusinessActionPreflight(businessId, action);
+  }
+
+  @Get('audit-logs/timeline')
+  @UseGuards(PlatformGuard)
+  getAuditTimeline(
+    @Query()
+    query: {
+      limit?: string;
+      cursor?: string;
+      businessId?: string;
+      action?: string;
+      resourceType?: string;
+      outcome?: string;
+      correlationId?: string;
+      requestId?: string;
+      sessionId?: string;
+    },
+  ) {
+    return this.platformService.getAuditTimeline(query);
+  }
+
   @Get('audit-logs')
   @UseGuards(PlatformGuard)
   listAuditLogs(
@@ -135,13 +202,21 @@ export class PlatformController {
   updateBusinessStatus(
     @Req() req: { user?: { sub?: string } },
     @Param('id') id: string,
-    @Body() body: { status: BusinessStatus; reason?: string },
+    @Body()
+    body: {
+      status: BusinessStatus;
+      reason?: string;
+      expectedUpdatedAt?: string;
+      idempotencyKey?: string;
+    },
   ) {
     return this.platformService.updateBusinessStatus(
       id,
       body.status,
       req.user?.sub || '',
       body.reason,
+      body.expectedUpdatedAt ? new Date(body.expectedUpdatedAt) : null,
+      body.idempotencyKey,
     );
   }
 
@@ -150,12 +225,22 @@ export class PlatformController {
   updateReadOnly(
     @Req() req: { user?: { sub?: string } },
     @Param('id') id: string,
-    @Body() body: { enabled: boolean; reason?: string },
+    @Body()
+    body: {
+      enabled: boolean;
+      reason?: string;
+      expectedUpdatedAt?: string;
+      idempotencyKey?: string;
+    },
   ) {
     return this.platformService.updateReadOnly(id, {
       enabled: body.enabled,
       reason: body.reason,
       platformAdminId: req.user?.sub || '',
+      expectedUpdatedAt: body.expectedUpdatedAt
+        ? new Date(body.expectedUpdatedAt)
+        : null,
+      idempotencyKey: body.idempotencyKey,
     });
   }
 
@@ -173,6 +258,8 @@ export class PlatformController {
       graceEndsAt?: string | null;
       expiresAt?: string | null;
       reason?: string;
+      expectedUpdatedAt?: string;
+      idempotencyKey?: string;
     },
   ) {
     return this.platformService.updateSubscription(businessId, {
@@ -184,6 +271,39 @@ export class PlatformController {
       graceEndsAt: body.graceEndsAt ? new Date(body.graceEndsAt) : null,
       expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
       reason: body.reason,
+      expectedUpdatedAt: body.expectedUpdatedAt
+        ? new Date(body.expectedUpdatedAt)
+        : null,
+      idempotencyKey: body.idempotencyKey,
+    });
+  }
+
+  @Post('subscriptions/:businessId/purchase')
+  @UseGuards(PlatformGuard)
+  recordSubscriptionPurchase(
+    @Req() req: { user?: { sub?: string } },
+    @Param('businessId') businessId: string,
+    @Body()
+    body: {
+      tier: SubscriptionTier;
+      durationDays: number;
+      startsAt?: string | null;
+      reason?: string;
+      expectedUpdatedAt?: string;
+      idempotencyKey?: string;
+    },
+  ) {
+    return this.platformService.recordSubscriptionPurchase({
+      businessId,
+      platformAdminId: req.user?.sub || '',
+      tier: body.tier,
+      durationDays: body.durationDays,
+      startsAt: body.startsAt ? new Date(body.startsAt) : null,
+      reason: body.reason,
+      expectedUpdatedAt: body.expectedUpdatedAt
+        ? new Date(body.expectedUpdatedAt)
+        : null,
+      idempotencyKey: body.idempotencyKey,
     });
   }
 
@@ -198,6 +318,8 @@ export class PlatformController {
       confirmBusinessId?: string;
       confirmText?: string;
       dryRun?: boolean;
+      expectedUpdatedAt?: string;
+      idempotencyKey?: string;
     },
   ) {
     return this.platformService.purgeBusiness(
@@ -207,7 +329,18 @@ export class PlatformController {
       body.confirmBusinessId,
       body.confirmText,
       body.dryRun,
+      body.expectedUpdatedAt ? new Date(body.expectedUpdatedAt) : null,
+      body.idempotencyKey,
     );
+  }
+
+  @Post('businesses/:id/purge-preflight')
+  @UseGuards(PlatformGuard)
+  purgeBusinessPreflight(
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+  ) {
+    return this.platformService.getPurgePreflight(id, body.reason);
   }
 
   @Post('support-access/requests')
@@ -220,6 +353,8 @@ export class PlatformController {
       reason: string;
       scope?: string[];
       durationHours?: number;
+      severity?: SupportRequestSeverity;
+      priority?: SupportRequestPriority;
     },
   ) {
     return this.supportAccessService.createRequest({
@@ -228,19 +363,58 @@ export class PlatformController {
       reason: body.reason,
       scope: body.scope,
       durationHours: body.durationHours,
+      severity: body.severity,
+      priority: body.priority,
     });
   }
 
   @Get('support-access/requests')
   @UseGuards(PlatformGuard)
   listSupportRequests(
-    @Req() req: { user?: { sub?: string } },
-    @Query() query: { limit?: string; cursor?: string; status?: string },
+    @Query()
+    query: {
+      limit?: string;
+      cursor?: string;
+      status?: string;
+      businessId?: string;
+      platformAdminId?: string;
+      severity?: string;
+      priority?: string;
+      requestedFrom?: string;
+      requestedTo?: string;
+    },
   ) {
-    return this.supportAccessService.listRequestsForPlatform(
-      req.user?.sub || '',
-      query,
-    );
+    return this.supportAccessService.listRequestsForPlatform(query);
+  }
+
+  @Get('support-access/sessions')
+  @UseGuards(PlatformGuard)
+  listSupportSessions(
+    @Query()
+    query: {
+      limit?: string;
+      cursor?: string;
+      businessId?: string;
+      platformAdminId?: string;
+      activeOnly?: string;
+      requestId?: string;
+    },
+  ) {
+    return this.supportAccessService.listSessionsForPlatform(query);
+  }
+
+  @Post('support-access/sessions/:id/revoke')
+  @UseGuards(PlatformGuard)
+  revokeSupportSession(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') id: string,
+    @Body() body: { reason: string },
+  ) {
+    return this.supportAccessService.revokeSession({
+      sessionId: id,
+      platformAdminId: req.user?.sub || '',
+      reason: body.reason,
+    });
   }
 
   @Post('support-access/requests/:id/activate')
@@ -312,6 +486,161 @@ export class PlatformController {
     return this.platformService.listExportJobs(query);
   }
 
+  @Get('exports/stats')
+  @UseGuards(PlatformGuard)
+  getExportQueueStats(
+    @Query()
+    query: {
+      businessId?: string;
+      type?: string;
+    },
+  ) {
+    return this.platformService.getExportQueueStats(query);
+  }
+
+  @Post('exports/:id/retry')
+  @UseGuards(PlatformGuard)
+  retryExportJob(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+  ) {
+    return this.platformService.retryExportJob({
+      exportJobId: id,
+      platformAdminId: req.user?.sub || '',
+      reason: body.reason,
+    });
+  }
+
+  @Post('exports/:id/requeue')
+  @UseGuards(PlatformGuard)
+  requeueExportJob(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+  ) {
+    return this.platformService.requeueExportJob({
+      exportJobId: id,
+      platformAdminId: req.user?.sub || '',
+      reason: body.reason,
+    });
+  }
+
+  @Post('exports/:id/cancel')
+  @UseGuards(PlatformGuard)
+  cancelExportJob(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+  ) {
+    return this.platformService.cancelExportJob({
+      exportJobId: id,
+      platformAdminId: req.user?.sub || '',
+      reason: body.reason,
+    });
+  }
+
+  @Get('incidents')
+  @UseGuards(PlatformGuard)
+  listIncidents(
+    @Query()
+    query: {
+      limit?: string;
+      cursor?: string;
+      businessId?: string;
+      status?: string;
+      severity?: string;
+    },
+  ) {
+    return this.platformService.listIncidents(query);
+  }
+
+  @Post('incidents')
+  @UseGuards(PlatformGuard)
+  createIncident(
+    @Req() req: { user?: { sub?: string } },
+    @Body()
+    body: {
+      businessId: string;
+      reason: string;
+      title?: string;
+      severity?: PlatformIncidentSeverity;
+      ownerPlatformAdminId?: string;
+      metadata?: Record<string, unknown>;
+    },
+  ) {
+    return this.platformService.createIncident({
+      businessId: body.businessId,
+      reason: body.reason,
+      title: body.title,
+      severity: body.severity,
+      ownerPlatformAdminId: body.ownerPlatformAdminId,
+      metadata: body.metadata,
+      platformAdminId: req.user?.sub || '',
+    });
+  }
+
+  @Patch('incidents/:id')
+  @UseGuards(PlatformGuard)
+  updateIncident(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') id: string,
+    @Body()
+    body: {
+      title?: string;
+      reason?: string;
+      severity?: PlatformIncidentSeverity;
+      ownerPlatformAdminId?: string | null;
+      status?: PlatformIncidentStatus;
+    },
+  ) {
+    return this.platformService.updateIncident({
+      incidentId: id,
+      platformAdminId: req.user?.sub || '',
+      title: body.title,
+      reason: body.reason,
+      severity: body.severity,
+      ownerPlatformAdminId: body.ownerPlatformAdminId,
+      status: body.status,
+    });
+  }
+
+  @Post('incidents/:id/transition')
+  @UseGuards(PlatformGuard)
+  transitionIncident(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') id: string,
+    @Body()
+    body: {
+      toStatus: PlatformIncidentStatus;
+      reason: string;
+      note?: string;
+    },
+  ) {
+    return this.platformService.transitionIncident({
+      incidentId: id,
+      platformAdminId: req.user?.sub || '',
+      toStatus: body.toStatus,
+      reason: body.reason,
+      note: body.note,
+    });
+  }
+
+  @Post('incidents/:id/note')
+  @UseGuards(PlatformGuard)
+  addIncidentNote(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') id: string,
+    @Body() body: { note: string; metadata?: Record<string, unknown> },
+  ) {
+    return this.platformService.addIncidentNote({
+      incidentId: id,
+      platformAdminId: req.user?.sub || '',
+      note: body.note,
+      metadata: body.metadata,
+    });
+  }
+
   @Post('subscription-requests/:id/approve')
   @UseGuards(PlatformGuard)
   approveSubscriptionRequest(
@@ -345,7 +674,14 @@ export class PlatformController {
   updateReview(
     @Req() req: { user?: { sub?: string } },
     @Param('id') id: string,
-    @Body() body: { underReview: boolean; reason: string; severity?: string },
+    @Body()
+    body: {
+      underReview: boolean;
+      reason: string;
+      severity?: string;
+      expectedUpdatedAt?: string;
+      idempotencyKey?: string;
+    },
   ) {
     return this.platformService.updateBusinessReview({
       businessId: id,
@@ -353,6 +689,10 @@ export class PlatformController {
       reason: body.reason,
       severity: body.severity,
       platformAdminId: req.user?.sub || '',
+      expectedUpdatedAt: body.expectedUpdatedAt
+        ? new Date(body.expectedUpdatedAt)
+        : null,
+      idempotencyKey: body.idempotencyKey,
     });
   }
 
@@ -361,12 +701,21 @@ export class PlatformController {
   revokeBusinessSessions(
     @Req() req: { user?: { sub?: string } },
     @Param('id') id: string,
-    @Body() body: { reason: string },
+    @Body()
+    body: {
+      reason: string;
+      expectedUpdatedAt?: string;
+      idempotencyKey?: string;
+    },
   ) {
     return this.platformService.revokeBusinessSessions({
       businessId: id,
       platformAdminId: req.user?.sub || '',
       reason: body.reason,
+      expectedUpdatedAt: body.expectedUpdatedAt
+        ? new Date(body.expectedUpdatedAt)
+        : null,
+      idempotencyKey: body.idempotencyKey,
     });
   }
 
@@ -381,6 +730,8 @@ export class PlatformController {
       ttlSeconds?: number | null;
       expiresAt?: string | null;
       reason: string;
+      expectedUpdatedAt?: string;
+      idempotencyKey?: string;
     },
   ) {
     return this.platformService.updateRateLimits({
@@ -390,6 +741,10 @@ export class PlatformController {
       ttlSeconds: body.ttlSeconds ?? null,
       expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
       reason: body.reason,
+      expectedUpdatedAt: body.expectedUpdatedAt
+        ? new Date(body.expectedUpdatedAt)
+        : null,
+      idempotencyKey: body.idempotencyKey,
     });
   }
 
@@ -450,6 +805,23 @@ export class PlatformController {
       endsAt: body.endsAt ? new Date(body.endsAt) : null,
       platformAdminId: req.user?.sub || '',
       reason: body.reason,
+      targetBusinessIds: body.targetBusinessIds,
+      targetTiers: body.targetTiers,
+      targetStatuses: body.targetStatuses,
+    });
+  }
+
+  @Post('announcements/preview')
+  @UseGuards(PlatformGuard)
+  previewAnnouncementAudience(
+    @Body()
+    body: {
+      targetBusinessIds?: string[];
+      targetTiers?: string[];
+      targetStatuses?: string[];
+    },
+  ) {
+    return this.platformService.previewAnnouncementAudience({
       targetBusinessIds: body.targetBusinessIds,
       targetTiers: body.targetTiers,
       targetStatuses: body.targetStatuses,

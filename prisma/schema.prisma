@@ -44,6 +44,7 @@ model Business {
   offlineActions              OfflineAction[]
   offlineDevices              OfflineDevice[]
   platformAnnouncementTargets PlatformAnnouncementBusinessTarget[]
+  platformIncidents           PlatformIncident[]
   priceLists                  PriceList[]
   products                    Product[]
   productImages               ProductImage[]
@@ -172,6 +173,9 @@ model PlatformAdmin {
   subscriptionRequests  SubscriptionRequest[]
   supportAccessRequests SupportAccessRequest[]
   supportAccessSessions SupportAccessSession[]
+  createdIncidents      PlatformIncident[]      @relation("PlatformIncidentCreatedBy")
+  ownedIncidents        PlatformIncident[]      @relation("PlatformIncidentOwner")
+  incidentEvents        PlatformIncidentEvent[]
 }
 
 model Unit {
@@ -250,6 +254,8 @@ model SupportAccessRequest {
   businessId       String
   platformAdminId  String
   reason           String
+  severity         SupportRequestSeverity @default(MEDIUM)
+  priority         SupportRequestPriority @default(MEDIUM)
   status           SupportAccessStatus    @default(PENDING)
   requestedAt      DateTime               @default(now())
   decidedAt        DateTime?
@@ -264,6 +270,8 @@ model SupportAccessRequest {
   sessions         SupportAccessSession[]
 
   @@index([businessId, status])
+  @@index([status, severity, priority, requestedAt])
+  @@index([platformAdminId, requestedAt])
 }
 
 model SupportAccessSession {
@@ -281,6 +289,9 @@ model SupportAccessSession {
   request         SupportAccessRequest @relation(fields: [requestId], references: [id])
 
   @@index([businessId])
+  @@index([platformAdminId, createdAt])
+  @@index([requestId, createdAt])
+  @@index([revokedAt, expiresAt])
 }
 
 model ApprovalPolicy {
@@ -417,6 +428,47 @@ model PlatformAuditLog {
   createdAt       DateTime @default(now())
 
   @@index([createdAt])
+}
+
+model PlatformIncident {
+  id                       String                   @id @default(uuid())
+  businessId               String
+  status                   PlatformIncidentStatus   @default(OPEN)
+  severity                 PlatformIncidentSeverity @default(MEDIUM)
+  title                    String?
+  reason                   String
+  source                   String                   @default("LEGACY_REVIEW")
+  createdByPlatformAdminId String?
+  ownerPlatformAdminId     String?
+  metadata                 Json?
+  openedAt                 DateTime                 @default(now())
+  closedAt                 DateTime?
+  createdAt                DateTime                 @default(now())
+  updatedAt                DateTime                 @updatedAt
+  business                 Business                 @relation(fields: [businessId], references: [id])
+  createdBy                PlatformAdmin?           @relation("PlatformIncidentCreatedBy", fields: [createdByPlatformAdminId], references: [id])
+  owner                    PlatformAdmin?           @relation("PlatformIncidentOwner", fields: [ownerPlatformAdminId], references: [id])
+  events                   PlatformIncidentEvent[]
+
+  @@index([businessId, status, createdAt])
+  @@index([status, severity, createdAt])
+}
+
+model PlatformIncidentEvent {
+  id              String           @id @default(uuid())
+  incidentId      String
+  eventType       String
+  fromStatus      PlatformIncidentStatus?
+  toStatus        PlatformIncidentStatus?
+  note            String?
+  metadata        Json?
+  createdAt       DateTime         @default(now())
+  createdByAdminId String?
+  incident        PlatformIncident @relation(fields: [incidentId], references: [id])
+  createdBy       PlatformAdmin?   @relation(fields: [createdByAdminId], references: [id])
+
+  @@index([incidentId, createdAt])
+  @@index([createdByAdminId, createdAt])
 }
 
 model Subscription {
@@ -1546,11 +1598,40 @@ enum PlatformAdminStatus {
   DEACTIVATED
 }
 
+enum PlatformIncidentStatus {
+  OPEN
+  INVESTIGATING
+  MITIGATED
+  RESOLVED
+  CLOSED
+}
+
+enum PlatformIncidentSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
 enum SupportAccessStatus {
   PENDING
   APPROVED
   REJECTED
   EXPIRED
+}
+
+enum SupportRequestSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum SupportRequestPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
 }
 
 enum ExportJobType {
@@ -1571,6 +1652,7 @@ enum ExportJobStatus {
   COMPLETED
   FAILED
   RUNNING
+  CANCELED
 }
 
 enum UnitType {
