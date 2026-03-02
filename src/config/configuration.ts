@@ -75,4 +75,26 @@ export default () => ({
     workerIntervalMs: process.env.EXPORT_WORKER_INTERVAL_MS || '15000',
     workerMaxAttempts: process.env.EXPORT_WORKER_MAX_ATTEMPTS || '3',
   },
+  supportChat: {
+    enabled: process.env.SUPPORT_CHAT_ENABLED === 'true',
+    manualIndexPath:
+      process.env.SUPPORT_CHAT_MANUAL_INDEX_PATH ||
+      'frontend/docs/manual/manual.freeze.m09.index.jsonl',
+    manualSourceDir:
+      process.env.SUPPORT_CHAT_MANUAL_SOURCE_DIR || 'frontend/docs/manual',
+    vectorEnabled: process.env.SUPPORT_CHAT_VECTOR_ENABLED === 'true',
+    vectorTopK: process.env.SUPPORT_CHAT_VECTOR_TOP_K
+      ? parseInt(process.env.SUPPORT_CHAT_VECTOR_TOP_K, 10)
+      : 20,
+    vectorMinScore: process.env.SUPPORT_CHAT_VECTOR_MIN_SCORE
+      ? parseFloat(process.env.SUPPORT_CHAT_VECTOR_MIN_SCORE)
+      : 0.05,
+    embeddingModel:
+      process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small',
+    escalationContact:
+      process.env.SUPPORT_CHAT_ESCALATION_CONTACT ||
+      process.env.SUPPORT_EMAIL ||
+      process.env.PLATFORM_ADMIN_EMAIL ||
+      'support@newvisioninventory.com',
+  },
 });

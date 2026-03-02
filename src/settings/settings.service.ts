@@ -114,9 +114,10 @@ export class SettingsService {
       },
     });
     if (missingCount > 0) {
-      throw new BadRequestException(
-        `SMS/WhatsApp require phone numbers. ${missingCount} active user(s) missing phone numbers.`,
-      );
+      throw new BadRequestException({
+        errorCode: 'SMS_WHATSAPP_PHONE_REQUIRED',
+        message: `SMS/WhatsApp require phone numbers. ${missingCount} active user(s) missing phone numbers.`,
+      });
     }
   }
 

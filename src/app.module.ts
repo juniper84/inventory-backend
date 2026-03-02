@@ -48,6 +48,7 @@ import { ApiMetricsInterceptor } from './metrics/api-metrics.interceptor';
 import { AuditContextInterceptor } from './audit/audit-context.interceptor';
 import { TenantThrottlerGuard } from './throttler/tenant-throttler.guard';
 import { BusinessStatusGuard } from './business/business-status.guard';
+import { SupportChatModule } from './support-chat/support-chat.module';
 
 @Module({
   imports: [
@@ -100,6 +101,7 @@ import { BusinessStatusGuard } from './business/business-status.guard';
     ApprovalsModule,
     AccessRequestsModule,
     NotesModule,
+    SupportChatModule,
   ],
   controllers: [AppController],
   providers: [
