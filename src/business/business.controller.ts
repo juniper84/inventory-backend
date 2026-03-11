@@ -2,6 +2,7 @@ import { Body, Controller, Get, Post, Put, Req } from '@nestjs/common';
 import { BusinessService } from './business.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('business')
 export class BusinessController {
@@ -10,17 +11,18 @@ export class BusinessController {
   @Get()
   @Permissions(PermissionsList.BUSINESS_READ)
   async getBusiness(@Req() req: { user?: { businessId: string } }) {
-    return this.businessService.getBusiness(req.user?.businessId || '');
+    return this.businessService.getBusiness(requireBusinessId(req));
   }
 
   @Put()
   @Permissions(PermissionsList.BUSINESS_UPDATE)
   async updateBusiness(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { name?: string; defaultLanguage?: string },
   ) {
     return this.businessService.updateBusiness(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -33,8 +35,8 @@ export class BusinessController {
     body: { businessId: string; password: string; confirmText: string },
   ) {
     return this.businessService.deleteBusinessByOwner({
-      businessId: req.user?.businessId || '',
-      userId: req.user?.sub || '',
+      businessId: requireBusinessId(req),
+      userId: requireUserId(req),
       password: body.password,
       confirmBusinessId: body.businessId,
       confirmText: body.confirmText,

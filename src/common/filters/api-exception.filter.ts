@@ -5,6 +5,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import type { Response } from 'express';
 
 type ErrorPayload = {
@@ -48,6 +49,41 @@ export class ApiExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
+
+    // Handle Prisma-specific errors before falling through to generic handling
+    if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+      if (exception.code === 'P2025') {
+        return response.status(HttpStatus.NOT_FOUND).json({
+          statusCode: HttpStatus.NOT_FOUND,
+          message: 'Record not found.',
+          error: 'Not Found',
+          errorCode: 'NOT_FOUND',
+        });
+      }
+      if (exception.code === 'P2002') {
+        return response.status(HttpStatus.CONFLICT).json({
+          statusCode: HttpStatus.CONFLICT,
+          message: 'A record with this value already exists.',
+          error: 'Conflict',
+          errorCode: 'DUPLICATE_ENTRY',
+        });
+      }
+      if (exception.code === 'P2003') {
+        return response.status(HttpStatus.BAD_REQUEST).json({
+          statusCode: HttpStatus.BAD_REQUEST,
+          message: 'Invalid reference to a related record.',
+          error: 'Bad Request',
+          errorCode: 'INVALID_REFERENCE',
+        });
+      }
+      return response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+        statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+        message: 'Unexpected error.',
+        error: 'Internal Server Error',
+        errorCode: 'UNKNOWN_ERROR',
+      });
+    }
+
     const isHttp = exception instanceof HttpException;
     const status = isHttp
       ? exception.getStatus()
@@ -57,7 +93,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       : undefined;
     const message =
       resolveMessage(payload) ||
-      (exception instanceof Error ? exception.message : null) ||
+      (isHttp && exception instanceof Error ? exception.message : null) ||
       'Unexpected error.';
     const errorCode =
       typeof payload === 'object' && payload?.errorCode

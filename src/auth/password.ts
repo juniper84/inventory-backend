@@ -25,7 +25,10 @@ export function verifyPassword(password: string, passwordHash: string) {
 
 export function validatePassword(password: string) {
   const hasMinLength = password.length >= 8;
+  // G1-L1: Enforce max length to prevent DoS via extremely long passwords
+  // (bcrypt/scrypt with a 10kb password can consume significant CPU).
+  const hasMaxLength = password.length <= 128;
   const hasLetter = /[A-Za-z]/.test(password);
   const hasNumber = /\d/.test(password);
-  return hasMinLength && hasLetter && hasNumber;
+  return hasMinLength && hasMaxLength && hasLetter && hasNumber;
 }

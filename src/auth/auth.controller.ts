@@ -6,6 +6,7 @@ import {
   Post,
   Req,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { Public } from './public.decorator';
 import { UsersService } from '../users/users.service';
@@ -13,6 +14,7 @@ import { BusinessService } from '../business/business.service';
 import { SubscriptionTier } from '@prisma/client';
 import { validatePassword } from './password';
 import { buildRequestMetadata } from '../audit/audit.utils';
+import { requireUserId } from '../common/request-context';
 
 @Controller('auth')
 export class AuthController {
@@ -24,6 +26,7 @@ export class AuthController {
 
   @Post('login')
   @Public()
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   async login(
     @Req()
     req: {
@@ -51,14 +54,12 @@ export class AuthController {
     },
     @Body()
     body: {
-      userId: string;
       refreshToken: string;
       businessId: string;
       deviceId?: string;
     },
   ) {
     return this.authService.refreshToken(
-      body.userId,
       body.refreshToken,
       body.businessId,
       body.deviceId,
@@ -89,6 +90,7 @@ export class AuthController {
 
   @Post('password-reset/request')
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async requestReset(@Body() body: { email: string; businessId?: string }) {
     return this.authService.requestPasswordResetByEmail(
       body.email,
@@ -98,6 +100,7 @@ export class AuthController {
 
   @Post('password-reset/confirm')
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async confirmReset(
     @Body() body: { userId?: string; token: string; password: string },
   ) {
@@ -110,6 +113,7 @@ export class AuthController {
 
   @Post('signup')
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async signup(
     @Body()
     body: {
@@ -134,9 +138,10 @@ export class AuthController {
     const { business, roles } = await this.businessService.createBusiness({
       name: body.businessName,
       tier: body.tier,
+      actorId: 'signup', // no human actor yet — user is created below
     });
 
-    const owner = await this.usersService.create(business.id, {
+    const owner = await this.usersService.create(business.id, 'signup', {
       name: body.ownerName,
       email: body.email,
       status: 'PENDING',
@@ -149,17 +154,26 @@ export class AuthController {
       await this.usersService.assignRole(owner.id, systemOwnerRoleId);
     }
 
-    const verification = await this.authService.requestEmailVerification(
-      owner.id,
-      business.id,
-    );
+    await this.authService.requestEmailVerification(owner.id, business.id);
 
     return {
       verificationRequired: true,
       userId: owner.id,
       businessId: business.id,
-      verificationToken: verification?.token,
     };
+  }
+
+  @Post('change-password')
+  async changePassword(
+    @Req() req: { user?: { sub?: string } },
+    @Body() body: { currentPassword: string; newPassword: string },
+  ) {
+    await this.authService.changePassword(
+      requireUserId(req),
+      body.currentPassword,
+      body.newPassword,
+    );
+    return { ok: true };
   }
 
   @Post('switch-business')
@@ -170,7 +184,13 @@ export class AuthController {
       ip?: string;
       headers?: Record<string, string | string[] | undefined>;
     },
-    @Body() body: { businessId: string; password?: string; deviceId?: string },
+    @Body()
+    body: {
+      businessId: string;
+      password?: string;
+      deviceId?: string;
+      refreshToken?: string;
+    },
   ) {
     if (body.password) {
       return this.authService.switchBusiness({
@@ -183,16 +203,17 @@ export class AuthController {
     }
 
     return this.authService.switchBusinessForUser({
-      userId: req.user?.sub || '',
+      userId: requireUserId(req),
       businessId: body.businessId,
       deviceId: body.deviceId,
+      refreshToken: body.refreshToken,
       metadata: buildRequestMetadata(req),
     });
   }
 
   @Get('businesses')
   async listBusinesses(@Req() req: { user?: { sub?: string } }) {
-    return this.authService.listUserBusinesses(req.user?.sub || '');
+    return this.authService.listUserBusinesses(requireUserId(req));
   }
 
   @Post('invite/accept')
@@ -205,6 +226,7 @@ export class AuthController {
 
   @Post('email-verification/request')
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async requestEmailVerification(
     @Body() body: { email: string; businessId: string },
   ) {
@@ -216,6 +238,7 @@ export class AuthController {
 
   @Post('email-verification/confirm')
   @Public()
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   async confirmEmailVerification(
     @Body() body: { token: string; deviceId?: string; businessId?: string },
   ) {

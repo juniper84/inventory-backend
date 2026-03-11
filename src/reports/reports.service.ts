@@ -973,9 +973,365 @@ export class ReportsService {
     };
   }
 
+  async topProductsReport(
+    businessId: string,
+    userId: string,
+    filters?: {
+      startDate?: string;
+      endDate?: string;
+      branchId?: string;
+      limit?: string;
+    },
+    branchScope: string[] = [],
+  ) {
+    const dateFilter = this.buildDateFilter(
+      filters?.startDate,
+      filters?.endDate,
+    );
+    const branchFilter = this.resolveBranchScope(
+      branchScope,
+      filters?.branchId,
+    );
+    const limit = Number(filters?.limit ?? 5);
+    const take = Number.isFinite(limit) ? Math.max(1, Math.min(limit, 10)) : 5;
+
+    const grouped = await this.prisma.saleLine.groupBy({
+      by: ['variantId'],
+      where: {
+        sale: {
+          businessId,
+          status: 'COMPLETED',
+          ...branchFilter,
+          ...(dateFilter ? { createdAt: dateFilter } : {}),
+        },
+      },
+      _sum: { lineTotal: true, quantity: true },
+      _count: { id: true },
+      orderBy: { _sum: { lineTotal: 'desc' } },
+      take,
+    });
+
+    const variantIds = grouped.map((row) => row.variantId);
+    const variants = await this.prisma.variant.findMany({
+      where: { businessId, id: { in: variantIds } },
+      select: {
+        id: true,
+        name: true,
+        sku: true,
+        product: { select: { name: true } },
+      },
+    });
+    const variantLookup = new Map(variants.map((variant) => [variant.id, variant]));
+
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      branchId: filters?.branchId,
+      action: 'REPORT_TOP_PRODUCTS',
+      resourceType: 'Report',
+      outcome: 'SUCCESS',
+      metadata: { resourceName: 'Top products report' },
+    });
+
+    return {
+      items: grouped.map((row) => {
+        const variant = variantLookup.get(row.variantId);
+        return {
+          variantId: row.variantId,
+          variantName: variant?.name ?? null,
+          productName: variant?.product?.name ?? null,
+          sku: variant?.sku ?? null,
+          totalRevenue: Number(row._sum.lineTotal ?? 0),
+          quantity: Number(row._sum.quantity ?? 0),
+          saleLineCount: row._count.id,
+        };
+      }),
+    };
+  }
+
+  async salesByBranchReport(
+    businessId: string,
+    userId: string,
+    filters?: { startDate?: string; endDate?: string; branchId?: string },
+    branchScope: string[] = [],
+  ) {
+    const dateFilter = this.buildDateFilter(
+      filters?.startDate,
+      filters?.endDate,
+    );
+    const branchFilter = this.resolveBranchScope(
+      branchScope,
+      filters?.branchId,
+    );
+
+    const grouped = await this.prisma.sale.groupBy({
+      by: ['branchId'],
+      where: {
+        businessId,
+        status: 'COMPLETED',
+        ...branchFilter,
+        ...(dateFilter ? { createdAt: dateFilter } : {}),
+      },
+      _sum: { total: true },
+      _count: { id: true },
+      orderBy: { _sum: { total: 'desc' } },
+    });
+
+    const branchLookup = await this.getBranchLookup(
+      businessId,
+      grouped.map((row) => row.branchId),
+    );
+    const total = grouped.reduce(
+      (sum, row) => sum + Number(row._sum.total ?? 0),
+      0,
+    );
+
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      branchId: filters?.branchId,
+      action: 'REPORT_SALES_BY_BRANCH',
+      resourceType: 'Report',
+      outcome: 'SUCCESS',
+      metadata: { resourceName: 'Sales by branch report' },
+    });
+
+    return {
+      total,
+      items: grouped.map((row) => ({
+        branchId: row.branchId,
+        branchName: branchLookup.get(row.branchId)?.name ?? null,
+        totalSales: Number(row._sum.total ?? 0),
+        saleCount: row._count.id,
+      })),
+    };
+  }
+
+  async expenseBreakdownReport(
+    businessId: string,
+    userId: string,
+    filters?: {
+      startDate?: string;
+      endDate?: string;
+      branchId?: string;
+      limit?: string;
+    },
+    branchScope: string[] = [],
+  ) {
+    const dateFilter = this.buildDateFilter(
+      filters?.startDate,
+      filters?.endDate,
+    );
+    const branchFilter = this.resolveBranchScope(
+      branchScope,
+      filters?.branchId,
+    );
+    const limit = Number(filters?.limit ?? 8);
+    const take = Number.isFinite(limit) ? Math.max(1, Math.min(limit, 20)) : 8;
+
+    const grouped = await this.prisma.expense.groupBy({
+      by: ['category'],
+      where: {
+        businessId,
+        ...branchFilter,
+        ...(dateFilter ? { expenseDate: dateFilter } : {}),
+      },
+      _sum: { amount: true },
+      _count: { id: true },
+      orderBy: { _sum: { amount: 'desc' } },
+      take,
+    });
+
+    const total = grouped.reduce(
+      (sum, row) => sum + Number(row._sum.amount ?? 0),
+      0,
+    );
+
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      branchId: filters?.branchId,
+      action: 'REPORT_EXPENSE_BREAKDOWN',
+      resourceType: 'Report',
+      outcome: 'SUCCESS',
+      metadata: { resourceName: 'Expense breakdown report' },
+    });
+
+    return {
+      total,
+      items: grouped.map((row) => {
+        const amount = Number(row._sum.amount ?? 0);
+        return {
+          category: row.category,
+          amount,
+          count: row._count.id,
+          percent: total > 0 ? (amount / total) * 100 : 0,
+        };
+      }),
+    };
+  }
+
+  async recentActivityReport(
+    businessId: string,
+    userId: string,
+    filters?: { branchId?: string; limit?: string },
+    branchScope: string[] = [],
+  ) {
+    const limit = Number(filters?.limit ?? 8);
+    const take = Number.isFinite(limit) ? Math.max(1, Math.min(limit, 20)) : 8;
+
+    const branchFilter = this.resolveBranchScope(
+      branchScope,
+      filters?.branchId,
+    );
+    const transferWhere = this.resolveTransferScope(
+      branchScope,
+      filters?.branchId,
+    );
+    const notificationBranchWhere = this.resolveNotificationScope(
+      branchScope,
+      filters?.branchId,
+    );
+
+    const [sales, transfers, notifications] = await Promise.all([
+      this.prisma.sale.findMany({
+        where: {
+          businessId,
+          status: 'COMPLETED',
+          ...branchFilter,
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+        select: {
+          id: true,
+          total: true,
+          createdAt: true,
+          branch: { select: { name: true } },
+        },
+      }),
+      this.prisma.transfer.findMany({
+        where: {
+          businessId,
+          ...transferWhere,
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+        select: {
+          id: true,
+          status: true,
+          createdAt: true,
+          sourceBranch: { select: { name: true } },
+          destinationBranch: { select: { name: true } },
+        },
+      }),
+      this.prisma.notification.findMany({
+        where: {
+          businessId,
+          archivedAt: null,
+          ...notificationBranchWhere,
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+        select: {
+          id: true,
+          title: true,
+          createdAt: true,
+          priority: true,
+          branch: { select: { name: true } },
+        },
+      }),
+    ]);
+
+    const combined = [
+      ...sales.map((row) => ({
+        id: `sale:${row.id}`,
+        type: 'sale',
+        createdAt: row.createdAt,
+        title: `Sale recorded`,
+        detail: row.branch?.name ?? null,
+      })),
+      ...transfers.map((row) => ({
+        id: `transfer:${row.id}`,
+        type: 'transfer',
+        createdAt: row.createdAt,
+        title: `Transfer ${row.status.toLowerCase()}`,
+        detail: `${row.sourceBranch.name} -> ${row.destinationBranch.name}`,
+      })),
+      ...notifications.map((row) => ({
+        id: `notification:${row.id}`,
+        type: 'alert',
+        createdAt: row.createdAt,
+        title: row.title,
+        detail: row.branch?.name ?? null,
+      })),
+    ]
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, take);
+
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      branchId: filters?.branchId,
+      action: 'REPORT_RECENT_ACTIVITY',
+      resourceType: 'Report',
+      outcome: 'SUCCESS',
+      metadata: { resourceName: 'Recent activity report' },
+    });
+
+    return { items: combined };
+  }
+
+  async stockValueReport(
+    businessId: string,
+    userId: string,
+    filters?: { branchId?: string },
+    branchScope: string[] = [],
+  ) {
+    const branchFilter = this.resolveBranchScope(
+      branchScope,
+      filters?.branchId,
+    );
+
+    const snapshots = await this.prisma.stockSnapshot.findMany({
+      where: { businessId, ...branchFilter },
+      include: {
+        variant: {
+          select: { defaultCost: true, defaultPrice: true },
+        },
+      },
+    });
+
+    const stockValue = snapshots.reduce((sum, row) => {
+      const unit = Number(
+        row.variant.defaultCost ?? row.variant.defaultPrice ?? 0,
+      );
+      return sum + Number(row.quantity ?? 0) * unit;
+    }, 0);
+
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      branchId: filters?.branchId,
+      action: 'REPORT_STOCK_VALUE',
+      resourceType: 'Report',
+      outcome: 'SUCCESS',
+      metadata: { resourceName: 'Stock value report' },
+    });
+
+    return {
+      stockValue,
+      trackedVariants: snapshots.length,
+    };
+  }
+
   private buildDateFilter(start?: string, end?: string) {
     if (!start && !end) {
-      return null;
+      // Default to last 90 days to prevent unbounded full-table scans.
+      const defaultEnd = new Date();
+      const defaultStart = new Date();
+      defaultStart.setDate(defaultStart.getDate() - 90);
+      defaultStart.setHours(0, 0, 0, 0);
+      return { gte: defaultStart, lte: defaultEnd };
     }
     const filter: { gte?: Date; lte?: Date } = {};
     if (start) {
@@ -1002,5 +1358,43 @@ export class ReportsService {
       return { branchId };
     }
     return { branchId: { in: branchScope } };
+  }
+
+  private resolveTransferScope(branchScope: string[], branchId?: string) {
+    if (!branchScope.length) {
+      if (!branchId) {
+        return {};
+      }
+      return {
+        OR: [{ sourceBranchId: branchId }, { destinationBranchId: branchId }],
+      };
+    }
+    if (branchId) {
+      if (!branchScope.includes(branchId)) {
+        throw new ForbiddenException('Branch-scoped role restriction.');
+      }
+      return {
+        OR: [{ sourceBranchId: branchId }, { destinationBranchId: branchId }],
+      };
+    }
+    return {
+      OR: [
+        { sourceBranchId: { in: branchScope } },
+        { destinationBranchId: { in: branchScope } },
+      ],
+    };
+  }
+
+  private resolveNotificationScope(branchScope: string[], branchId?: string) {
+    if (!branchScope.length) {
+      return branchId ? { OR: [{ branchId }, { branchId: null }] } : {};
+    }
+    if (branchId) {
+      if (!branchScope.includes(branchId)) {
+        throw new ForbiddenException('Branch-scoped role restriction.');
+      }
+      return { OR: [{ branchId }, { branchId: null }] };
+    }
+    return { OR: [{ branchId: { in: branchScope } }, { branchId: null }] };
   }
 }

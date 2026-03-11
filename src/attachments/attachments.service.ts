@@ -113,6 +113,7 @@ export class AttachmentsService {
 
   async create(
     businessId: string,
+    userId: string,
     data: {
       purchaseId?: string;
       purchaseOrderId?: string;
@@ -155,41 +156,43 @@ export class AttachmentsService {
         sizeMb,
       );
     }
-    const existing = await this.prisma.attachment.findFirst({
-      where: {
-        businessId,
-        filename: data.filename,
-        status: 'ACTIVE',
-        ...(data.purchaseId ? { purchaseId: data.purchaseId } : {}),
-        ...(data.purchaseOrderId
-          ? { purchaseOrderId: data.purchaseOrderId }
-          : {}),
-      },
-      orderBy: { version: 'desc' },
-    });
-    if (existing) {
-      await this.prisma.attachment.update({
-        where: { id: existing.id },
-        data: { status: 'ARCHIVED', archivedAt: new Date() },
+    const attachment = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.attachment.findFirst({
+        where: {
+          businessId,
+          filename: data.filename,
+          status: 'ACTIVE',
+          ...(data.purchaseId ? { purchaseId: data.purchaseId } : {}),
+          ...(data.purchaseOrderId
+            ? { purchaseOrderId: data.purchaseOrderId }
+            : {}),
+        },
+        orderBy: { version: 'desc' },
       });
-    }
-    const attachment = await this.prisma.attachment.create({
-      data: {
-        businessId,
-        purchaseId: data.purchaseId,
-        purchaseOrderId: data.purchaseOrderId,
-        filename: data.filename,
-        storageKey: data.storageKey ?? null,
-        url: data.url,
-        mimeType: data.mimeType ?? null,
-        sizeMb: sizeMb > 0 ? new Prisma.Decimal(sizeMb) : null,
-        version: existing ? existing.version + 1 : 1,
-      },
+      if (existing) {
+        await tx.attachment.update({
+          where: { id: existing.id },
+          data: { status: 'ARCHIVED', archivedAt: new Date() },
+        });
+      }
+      return tx.attachment.create({
+        data: {
+          businessId,
+          purchaseId: data.purchaseId,
+          purchaseOrderId: data.purchaseOrderId,
+          filename: data.filename,
+          storageKey: data.storageKey ?? null,
+          url: data.url,
+          mimeType: data.mimeType ?? null,
+          sizeMb: sizeMb > 0 ? new Prisma.Decimal(sizeMb) : null,
+          version: existing ? existing.version + 1 : 1,
+        },
+      });
     });
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'ATTACHMENT_UPLOAD',
       resourceType: 'Attachment',
       resourceId: attachment.id,
@@ -203,6 +206,7 @@ export class AttachmentsService {
   async remove(
     businessId: string,
     attachmentId: string,
+    userId: string,
     branchScope: string[] = [],
   ) {
     const existing = await this.prisma.attachment.findFirst({
@@ -225,7 +229,7 @@ export class AttachmentsService {
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'ATTACHMENT_REMOVE',
       resourceType: 'Attachment',
       resourceId: attachment.id,

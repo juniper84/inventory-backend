@@ -11,6 +11,7 @@ import {
 import { UsersService } from './users.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('users')
 export class UsersController {
@@ -29,21 +30,21 @@ export class UsersController {
       roleId?: string;
     },
   ) {
-    return this.usersService.list(req.user?.businessId || '', query);
+    return this.usersService.list(requireBusinessId(req), query);
   }
 
   @Get('me')
   me(@Req() req: { user?: { businessId?: string; sub?: string } }) {
     return this.usersService.getProfile(
-      req.user?.businessId || '',
-      req.user?.sub || '',
+      requireBusinessId(req),
+      requireUserId(req),
     );
   }
 
   @Post()
   @Permissions(PermissionsList.USERS_CREATE)
   create(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       name: string;
@@ -54,14 +55,14 @@ export class UsersController {
       mustResetPassword?: boolean;
     },
   ) {
-    return this.usersService.create(req.user?.businessId || '', body);
+    return this.usersService.create(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Put(':id')
   @Permissions(PermissionsList.USERS_UPDATE)
   update(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       name?: string;
@@ -71,16 +72,16 @@ export class UsersController {
       notificationPreferences?: Record<string, unknown> | null;
     },
   ) {
-    return this.usersService.update(req.user?.businessId || '', id, body);
+    return this.usersService.update(requireBusinessId(req), id, requireUserId(req), body);
   }
 
   @Post(':id/deactivate')
   @Permissions(PermissionsList.USERS_DEACTIVATE)
   deactivate(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
   ) {
-    return this.usersService.deactivate(req.user?.businessId || '', id);
+    return this.usersService.deactivate(requireBusinessId(req), id, requireUserId(req));
   }
 
   @Post('invite')
@@ -89,10 +90,10 @@ export class UsersController {
     @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { email: string; roleId: string },
   ) {
-    return this.usersService.invite(req.user?.businessId || '', {
+    return this.usersService.invite(requireBusinessId(req), {
       email: body.email,
       roleId: body.roleId,
-      createdById: req.user?.sub,
+      createdById: requireUserId(req),
     });
   }
 
@@ -102,20 +103,21 @@ export class UsersController {
     @Param('id') id: string,
     @Req() req: { user?: { businessId: string } },
   ) {
-    return this.usersService.listUserRoles(req.user?.businessId || '', id);
+    return this.usersService.listUserRoles(requireBusinessId(req), id);
   }
 
   @Post(':id/roles')
   @Permissions(PermissionsList.USERS_UPDATE)
   addUserRole(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { roleId: string; branchId?: string | null },
   ) {
     return this.usersService.addUserRole(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
       body.roleId,
+      requireUserId(req),
       body.branchId ?? null,
     );
   }
@@ -124,13 +126,14 @@ export class UsersController {
   @Permissions(PermissionsList.USERS_UPDATE)
   removeUserRole(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { roleId: string; branchId?: string | null },
   ) {
     return this.usersService.removeUserRole(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
       body.roleId,
+      requireUserId(req),
       body.branchId ?? null,
     );
   }

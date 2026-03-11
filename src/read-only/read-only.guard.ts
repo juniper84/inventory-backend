@@ -72,6 +72,12 @@ export class ReadOnlyGuard implements CanActivate {
       throw new ForbiddenException('Support access is read-only.');
     }
     if (!user?.businessId) {
+      // P4-SW1-H9: If an authenticated user has no businessId and is not platform/support scope,
+      // deny write access rather than silently allowing it. Unauthenticated requests (user=null)
+      // are handled upstream by the JWT guard.
+      if (user) {
+        throw new ForbiddenException('No business context — write access denied.');
+      }
       return true;
     }
 

@@ -12,6 +12,7 @@ import { ExportsService } from './exports.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
 import { SubscriptionBypass } from '../subscription/subscription.guard';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('exports')
 export class ExportsController {
@@ -34,7 +35,7 @@ export class ExportsController {
       );
     }
     return this.exportsService.exportStockCsv(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       branchId,
     );
   }
@@ -65,8 +66,8 @@ export class ExportsController {
     },
   ) {
     return this.exportsService.createExportJob(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
       req.user?.branchScope ?? [],
     );
@@ -90,7 +91,7 @@ export class ExportsController {
     },
   ) {
     return this.exportsService.listJobs(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -103,18 +104,25 @@ export class ExportsController {
     @Req() req: { user?: { businessId: string } },
     @Body() body: { acknowledgement?: string },
   ) {
-    return this.exportsService.runExportJob(id, body.acknowledgement);
+    return this.exportsService.runExportJob(
+      id,
+      requireBusinessId(req),
+      body.acknowledgement,
+    );
   }
 
   @Get('jobs/:id/download')
   @Permissions(PermissionsList.EXPORTS_WRITE)
-  downloadJob(@Param('id') id: string) {
-    return this.exportsService.downloadJob(id);
+  downloadJob(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.exportsService.downloadJob(id, requireBusinessId(req));
   }
 
   @Get('worker/status')
   @Permissions(PermissionsList.EXPORTS_WRITE)
-  getWorkerStatus(@Req() req: { user?: { businessId?: string } }) {
-    return this.exportsService.getWorkerStatus(req.user?.businessId);
+  getWorkerStatus(@Req() req: { user?: { businessId: string } }) {
+    return this.exportsService.getWorkerStatus(requireBusinessId(req));
   }
 }

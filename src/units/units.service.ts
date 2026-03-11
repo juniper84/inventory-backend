@@ -24,6 +24,7 @@ export class UnitsService {
 
   async createUnit(
     businessId: string,
+    userId: string,
     data: { code: string; label: string; unitType?: UnitType },
   ) {
     const code = data.code.trim().toLowerCase();
@@ -54,7 +55,7 @@ export class UnitsService {
     });
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'UNIT_CREATE',
       resourceType: 'Unit',
       resourceId: created.id,

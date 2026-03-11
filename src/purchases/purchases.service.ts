@@ -209,7 +209,16 @@ export class PurchasesService {
         include: {
           supplier: true,
           branch: true,
-          lines: true,
+          lines: {
+            include: {
+              variant: {
+                select: {
+                  name: true,
+                  product: { select: { name: true } },
+                },
+              },
+            },
+          },
           attachments: true,
         },
         orderBy: { createdAt: 'desc' },
@@ -504,7 +513,14 @@ export class PurchasesService {
       select: { id: true },
     });
     if (variants.length !== variantIds.length) {
-      return null;
+      throw new BadRequestException(
+        'One or more variants do not belong to this business.',
+      );
+    }
+    if (data.lines.some((line) => line.quantity <= 0 || line.unitCost < 0)) {
+      throw new BadRequestException(
+        'All line quantities must be positive and unit cost cannot be negative.',
+      );
     }
     const resolvedLines = await Promise.all(
       data.lines.map(async (line) => {
@@ -558,7 +574,7 @@ export class PurchasesService {
           include: { lines: true },
         });
       }
-      return { error: 'Idempotency key already used.' };
+      throw new BadRequestException('Idempotency key already used.');
     }
 
     let purchase;
@@ -693,7 +709,7 @@ export class PurchasesService {
           include: { lines: true },
         });
       }
-      return { error: 'Idempotency key already used.' };
+      throw new BadRequestException('Idempotency key already used.');
     }
 
     let purchase;
@@ -801,7 +817,7 @@ export class PurchasesService {
           include: { lines: true },
         });
       }
-      return { error: 'Idempotency key already used.' };
+      throw new BadRequestException('Idempotency key already used.');
     }
 
     const resolvedLines = await Promise.all(
@@ -906,6 +922,17 @@ export class PurchasesService {
     if (!po) {
       return null;
     }
+    const UNEDITABLE_STATUSES = [
+      PurchaseStatus.FULLY_RECEIVED,
+      PurchaseStatus.PARTIALLY_RECEIVED,
+      PurchaseStatus.CANCELLED,
+      PurchaseStatus.CLOSED,
+    ];
+    if ((UNEDITABLE_STATUSES as PurchaseStatus[]).includes(po.status)) {
+      throw new BadRequestException(
+        'Purchase order cannot be edited in its current status.',
+      );
+    }
     const requestedTotal = data.lines.reduce(
       (sum, line) =>
         sum.plus(new Prisma.Decimal(line.quantity).mul(line.unitCost)),
@@ -984,7 +1011,7 @@ export class PurchasesService {
         const existing = existingLineMap.get(line.variantId);
         if (existing) {
           await tx.purchaseOrderLine.update({
-            where: { id: existing.id },
+            where: { id: existing.id, purchaseOrderId },
             data: {
               quantity: new Prisma.Decimal(line.quantity),
               unitCost: new Prisma.Decimal(line.unitCost),
@@ -1006,7 +1033,7 @@ export class PurchasesService {
         }
       }
       return tx.purchaseOrder.update({
-        where: { id: purchaseOrderId },
+        where: { id: purchaseOrderId, businessId },
         data: { expectedAt },
         include: { lines: true },
       });
@@ -1038,6 +1065,14 @@ export class PurchasesService {
     if (!po) {
       return null;
     }
+    if (
+      po.status !== PurchaseStatus.DRAFT &&
+      po.status !== PurchaseStatus.PENDING_APPROVAL
+    ) {
+      throw new BadRequestException(
+        'Purchase order cannot be approved in its current status.',
+      );
+    }
     const total = po.lines.reduce(
       (sum, line) => sum.plus(line.quantity.mul(line.unitCost)),
       new Prisma.Decimal(0),
@@ -1059,7 +1094,7 @@ export class PurchasesService {
     }
 
     const updated = await this.prisma.purchaseOrder.update({
-      where: { id: purchaseOrderId },
+      where: { id: purchaseOrderId, businessId },
       data: { status: PurchaseStatus.APPROVED },
     });
 
@@ -1113,7 +1148,7 @@ export class PurchasesService {
     const purchaseBranch = data.purchaseId
       ? await this.prisma.purchase.findFirst({
           where: { id: data.purchaseId, businessId },
-          select: { branchId: true },
+          select: { branchId: true, status: true },
         })
       : null;
     const poBranch = data.purchaseOrderId
@@ -1125,6 +1160,12 @@ export class PurchasesService {
     if (data.purchaseId) {
       if (!purchaseBranch) {
         return null;
+      }
+      if (
+        purchaseBranch.status !== PurchaseStatus.APPROVED &&
+        purchaseBranch.status !== PurchaseStatus.PARTIALLY_RECEIVED
+      ) {
+        throw new BadRequestException('Purchase not approved for receiving.');
       }
     }
     if (data.purchaseOrderId) {
@@ -1488,8 +1529,15 @@ export class PurchasesService {
                 receivedTotal >= orderedTotal
                   ? PurchaseStatus.FULLY_RECEIVED
                   : PurchaseStatus.PARTIALLY_RECEIVED;
-              await tx.purchase.update({
-                where: { id: purchase.id },
+              // Use updateMany with a status guard so a CANCELLED/DRAFT purchase
+              // can never have its status overwritten by a concurrent receive
+              await tx.purchase.updateMany({
+                where: {
+                  id: purchase.id,
+                  status: {
+                    in: [PurchaseStatus.APPROVED, PurchaseStatus.PARTIALLY_RECEIVED],
+                  },
+                },
                 data: { status: nextStatus },
               });
             }
@@ -1513,8 +1561,13 @@ export class PurchasesService {
                 receivedTotal >= orderedTotal
                   ? PurchaseStatus.FULLY_RECEIVED
                   : PurchaseStatus.PARTIALLY_RECEIVED;
-              await tx.purchaseOrder.update({
-                where: { id: po.id },
+              await tx.purchaseOrder.updateMany({
+                where: {
+                  id: po.id,
+                  status: {
+                    in: [PurchaseStatus.APPROVED, PurchaseStatus.PARTIALLY_RECEIVED],
+                  },
+                },
                 data: { status: nextStatus },
               });
             }
@@ -1603,7 +1656,7 @@ export class PurchasesService {
       return null;
     }
     if (data.method === 'BANK_TRANSFER' && !data.reference) {
-      return { error: 'Bank transfer reference is required.' };
+      throw new BadRequestException('Bank transfer reference is required.');
     }
     const payment = await this.prisma.purchasePayment.create({
       data: {
@@ -1648,7 +1701,7 @@ export class PurchasesService {
     },
   ) {
     if (!data.lines.length) {
-      return { error: 'Return must include at least one line.' };
+      throw new BadRequestException('Return must include at least one line.');
     }
     const branch = await this.prisma.branch.findFirst({
       where: { id: data.branchId, businessId },

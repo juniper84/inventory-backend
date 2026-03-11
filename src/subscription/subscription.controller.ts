@@ -9,6 +9,7 @@ import {
 import { SubscriptionService } from './subscription.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('subscription')
 export class SubscriptionController {
@@ -18,7 +19,7 @@ export class SubscriptionController {
   @Permissions(PermissionsList.SUBSCRIPTION_READ)
   getSubscription(@Req() req: { user?: { businessId: string } }) {
     return this.subscriptionService.getSubscriptionSummary(
-      req.user?.businessId || '',
+      requireBusinessId(req),
     );
   }
 
@@ -26,7 +27,7 @@ export class SubscriptionController {
   @Permissions(PermissionsList.SUBSCRIPTION_REQUEST)
   listRequests(@Req() req: { user?: { businessId: string } }) {
     return this.subscriptionService.listSubscriptionRequests(
-      req.user?.businessId || '',
+      requireBusinessId(req),
     );
   }
 
@@ -45,8 +46,8 @@ export class SubscriptionController {
       throw new BadRequestException('type is required.');
     }
     return this.subscriptionService.createSubscriptionRequest(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }

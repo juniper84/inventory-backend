@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   Inject,
@@ -341,13 +342,14 @@ export class StockService {
 
   private async ensureExpiryPolicy(
     policy: 'ALLOW' | 'WARN' | 'BLOCK',
+    businessId: string,
     batchId?: string | null,
   ) {
     if (!batchId || policy === 'ALLOW') {
       return { allowed: true };
     }
-    const batch = await this.prisma.batch.findUnique({
-      where: { id: batchId },
+    const batch = await this.prisma.batch.findFirst({
+      where: { id: batchId, businessId },
     });
     if (!batch?.expiryDate) {
       return { allowed: true };
@@ -406,7 +408,7 @@ export class StockService {
     }
 
     if (data.type === 'NEGATIVE' && !data.lossReason) {
-      return { error: 'Loss reason is required for negative adjustments.' };
+      throw new BadRequestException('Loss reason is required for negative adjustments.');
     }
 
     if (policies.batchTrackingEnabled) {
@@ -415,15 +417,16 @@ export class StockService {
           where: { id: data.batchId },
         });
         if (!batch || batch.businessId !== businessId) {
-          return { error: 'Batch not found.' };
+          throw new BadRequestException('Batch not found.');
         }
       }
       const expiryCheck = await this.ensureExpiryPolicy(
         policies.expiryPolicy ?? 'WARN',
+        businessId,
         data.batchId,
       );
       if (!expiryCheck.allowed) {
-        return { error: expiryCheck.reason };
+        throw new BadRequestException(expiryCheck.reason ?? 'Batch is expired.');
       }
     }
 
@@ -442,20 +445,6 @@ export class StockService {
       unitQuantity,
       unitResolution.unitFactor,
     );
-
-    if (data.type === 'NEGATIVE' && !policies.negativeStockAllowed) {
-      const snapshot = await this.prisma.stockSnapshot.findFirst({
-        where: {
-          businessId,
-          branchId: data.branchId,
-          variantId: data.variantId,
-        },
-      });
-      const current = snapshot ? Number(snapshot.quantity) : 0;
-      if (current - Number(baseQuantity) < 0) {
-        return { error: 'Negative stock is not allowed.' };
-      }
-    }
 
     const approvalPayload = {
       branchId: data.branchId,
@@ -513,7 +502,7 @@ export class StockService {
           where: { id: idempotency.record.resourceId },
         });
       }
-      return { error: 'Idempotency key already used.' };
+      throw new BadRequestException('Idempotency key already used.');
     }
 
     const movementType =
@@ -525,82 +514,104 @@ export class StockService {
 
     let movement;
     let lossEntryId: string | null = null;
-    const beforeSnapshot = await this.prisma.stockSnapshot.findFirst({
-      where: {
-        businessId,
-        branchId: data.branchId,
-        variantId: data.variantId,
-      },
-    });
-    let afterSnapshot: typeof beforeSnapshot | null = null;
-    try {
-      movement = await this.prisma.stockMovement.create({
-        data: {
-          businessId,
-          branchId: data.branchId,
-          variantId: data.variantId,
-          createdById: userId,
-          quantity,
-          unitId: unitResolution.unitId,
-          unitQuantity,
-          movementType,
-          reason: data.reason,
-          batchId: data.batchId ?? null,
-        },
-      });
+    let beforeSnapshot: { id: string; quantity: Prisma.Decimal } | null = null;
 
-      if (data.type === 'NEGATIVE' && data.lossReason) {
-        const unitCost =
-          (await this.resolveUnitCost(
-            businessId,
-            data.branchId,
-            data.variantId,
-            data.batchId ?? null,
-            policies.valuationMethod,
-          )) ?? new Prisma.Decimal(variant.defaultCost ?? 0);
-        const totalCost = unitCost.mul(quantity);
-        const lossEntry = await this.prisma.lossEntry.create({
+    // Pre-compute loss cost before opening the transaction (read-only operation)
+    let resolvedUnitCost: Prisma.Decimal | null = null;
+    if (data.type === 'NEGATIVE' && data.lossReason) {
+      resolvedUnitCost =
+        (await this.resolveUnitCost(
+          businessId,
+          data.branchId,
+          data.variantId,
+          data.batchId ?? null,
+          policies.valuationMethod,
+        )) ?? new Prisma.Decimal(variant.defaultCost ?? 0);
+    }
+
+    let afterSnapshot: { id: string; quantity: Prisma.Decimal } | null = null;
+    try {
+      const txResult = await this.prisma.$transaction(async (tx) => {
+        const txBeforeSnapshot = await tx.stockSnapshot.findFirst({
+          where: { businessId, branchId: data.branchId, variantId: data.variantId },
+        });
+
+        if (data.type === 'NEGATIVE' && !policies.negativeStockAllowed) {
+          const current = txBeforeSnapshot ? Number(txBeforeSnapshot.quantity) : 0;
+          if (current - Number(baseQuantity) < 0) {
+            throw new BadRequestException('Negative stock is not allowed.');
+          }
+        }
+
+        const txMovement = await tx.stockMovement.create({
           data: {
             businessId,
             branchId: data.branchId,
             variantId: data.variantId,
-            stockMovementId: movement.id,
+            createdById: userId,
             quantity,
-            unitCost,
-            totalCost,
-            reason: data.lossReason,
-            note: data.reason ?? null,
+            unitId: unitResolution.unitId,
+            unitQuantity,
+            movementType,
+            reason: data.reason,
+            batchId: data.batchId ?? null,
           },
         });
-        lossEntryId = lossEntry.id;
-      }
 
-      const snapshot = await this.prisma.stockSnapshot.upsert({
-        where: {
-          businessId_branchId_variantId: {
+        let txLossEntryId: string | null = null;
+        if (data.type === 'NEGATIVE' && data.lossReason && resolvedUnitCost) {
+          const totalCost = resolvedUnitCost.mul(quantity);
+          const lossEntry = await tx.lossEntry.create({
+            data: {
+              businessId,
+              branchId: data.branchId,
+              variantId: data.variantId,
+              stockMovementId: txMovement.id,
+              quantity,
+              unitCost: resolvedUnitCost,
+              totalCost,
+              reason: data.lossReason,
+              note: data.reason ?? null,
+            },
+          });
+          txLossEntryId = lossEntry.id;
+        }
+
+        const txSnapshot = await tx.stockSnapshot.upsert({
+          where: {
+            businessId_branchId_variantId: {
+              businessId,
+              branchId: data.branchId,
+              variantId: data.variantId,
+            },
+          },
+          create: {
             businessId,
             branchId: data.branchId,
             variantId: data.variantId,
+            quantity,
           },
-        },
-        create: {
-          businessId,
-          branchId: data.branchId,
-          variantId: data.variantId,
-          quantity,
-        },
-        update: {
-          quantity: {
-            increment: data.type === 'POSITIVE' ? quantity : quantity.negated(),
+          update: {
+            quantity: {
+              increment:
+                data.type === 'POSITIVE' ? quantity : quantity.negated(),
+            },
           },
-        },
+        });
+
+        return { txMovement, txLossEntryId, txSnapshot, txBeforeSnapshot };
       });
-      afterSnapshot = snapshot;
+
+      movement = txResult.txMovement;
+      lossEntryId = txResult.txLossEntryId;
+      afterSnapshot = txResult.txSnapshot;
+      beforeSnapshot = txResult.txBeforeSnapshot;
+
       await this.maybeNotifyLowStock(
         businessId,
         data.branchId,
         data.variantId,
-        snapshot.quantity,
+        txResult.txSnapshot.quantity,
       );
     } catch (error) {
       if (idempotency) {
@@ -724,7 +735,7 @@ export class StockService {
       return null;
     }
     if (data.countedQuantity < 0) {
-      return { error: 'Counted quantity cannot be negative.' };
+      throw new BadRequestException('Counted quantity cannot be negative.');
     }
     const available = await this.ensureVariantAvailable(
       businessId,
@@ -745,15 +756,16 @@ export class StockService {
           where: { id: data.batchId },
         });
         if (!batch || batch.businessId !== businessId) {
-          return { error: 'Batch not found.' };
+          throw new BadRequestException('Batch not found.');
         }
       }
       const expiryCheck = await this.ensureExpiryPolicy(
         policies.expiryPolicy ?? 'WARN',
+        businessId,
         data.batchId,
       );
       if (!expiryCheck.allowed) {
-        return { error: expiryCheck.reason };
+        throw new BadRequestException(expiryCheck.reason ?? 'Batch is expired.');
       }
     }
 
@@ -781,7 +793,7 @@ export class StockService {
       },
     });
     const expectedQuantity = snapshot ? Number(snapshot.quantity) : 0;
-    const beforeSnapshot = snapshot;
+    let beforeSnapshot: typeof snapshot = null;
 
     const approvalPayload = {
       branchId: data.branchId,
@@ -839,55 +851,72 @@ export class StockService {
           where: { id: idempotency.record.resourceId },
         });
       }
-      return { error: 'Idempotency key already used.' };
+      throw new BadRequestException('Idempotency key already used.');
     }
 
+    // Signed variance: positive = surplus, negative = shortage.
+    // Do NOT use Math.abs — the sign carries meaningful information.
     const variance = Number(baseCountedQuantity) - expectedQuantity;
-    const varianceQuantity = new Prisma.Decimal(Math.abs(variance));
+    const varianceQuantity = new Prisma.Decimal(variance);
     const movementType = StockMovementType.STOCK_COUNT_VARIANCE;
 
     let movement;
-    let afterSnapshot: typeof beforeSnapshot | null = null;
+    let afterSnapshot: { id: string; quantity: Prisma.Decimal } | null = null;
     try {
-      movement = await this.prisma.stockMovement.create({
-        data: {
-          businessId,
-          branchId: data.branchId,
-          variantId: data.variantId,
-          createdById: userId,
-          quantity: varianceQuantity,
-          unitId: unitResolution.unitId,
-          unitQuantity,
-          movementType,
-          reason: data.reason,
-          batchId: data.batchId ?? null,
-        },
-      });
+      const txResult = await this.prisma.$transaction(async (tx) => {
+        const txBeforeSnapshot = await tx.stockSnapshot.findFirst({
+          where: { businessId, branchId: data.branchId, variantId: data.variantId },
+        });
 
-      const snapshot = await this.prisma.stockSnapshot.upsert({
-        where: {
-          businessId_branchId_variantId: {
+        if (!policies.negativeStockAllowed && Number(baseCountedQuantity) < 0) {
+          throw new BadRequestException('Negative stock is not allowed.');
+        }
+
+        const txMovement = await tx.stockMovement.create({
+          data: {
             businessId,
             branchId: data.branchId,
             variantId: data.variantId,
+            createdById: userId,
+            quantity: varianceQuantity,
+            unitId: unitResolution.unitId,
+            unitQuantity,
+            movementType,
+            reason: data.reason,
+            batchId: data.batchId ?? null,
           },
-        },
-        create: {
-          businessId,
-          branchId: data.branchId,
-          variantId: data.variantId,
-          quantity: baseCountedQuantity,
-        },
-        update: {
-          quantity: baseCountedQuantity,
-        },
+        });
+
+        const txSnapshot = await tx.stockSnapshot.upsert({
+          where: {
+            businessId_branchId_variantId: {
+              businessId,
+              branchId: data.branchId,
+              variantId: data.variantId,
+            },
+          },
+          create: {
+            businessId,
+            branchId: data.branchId,
+            variantId: data.variantId,
+            quantity: baseCountedQuantity,
+          },
+          update: {
+            quantity: baseCountedQuantity,
+          },
+        });
+
+        return { txMovement, txSnapshot, txBeforeSnapshot };
       });
-      afterSnapshot = snapshot;
+
+      movement = txResult.txMovement;
+      afterSnapshot = txResult.txSnapshot;
+      beforeSnapshot = txResult.txBeforeSnapshot;
       await this.maybeNotifyLowStock(
         businessId,
         data.branchId,
         data.variantId,
-        snapshot.quantity,
+        txResult.txSnapshot.quantity,
       );
     } catch (error) {
       if (idempotency) {
@@ -985,7 +1014,7 @@ export class StockService {
 
     const policies = await this.getStockPolicies(businessId);
     if (!policies.batchTrackingEnabled) {
-      return { error: 'Batch tracking is disabled.' };
+      throw new BadRequestException('Batch tracking is disabled.');
     }
 
     const batch = await this.prisma.batch.create({

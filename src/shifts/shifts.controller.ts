@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import { ShiftsService } from './shifts.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('shifts')
 export class ShiftsController {
@@ -20,7 +21,7 @@ export class ShiftsController {
     },
   ) {
     return this.shiftsService.list(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -36,7 +37,7 @@ export class ShiftsController {
       return null;
     }
     return this.shiftsService.getOpenShift(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       branchId,
     );
   }
@@ -48,8 +49,8 @@ export class ShiftsController {
     @Body() body: { branchId: string; openingCash: number; notes?: string },
   ) {
     return this.shiftsService.openShift(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -63,8 +64,8 @@ export class ShiftsController {
     @Body() body: { closingCash: number; varianceReason?: string },
   ) {
     return this.shiftsService.closeShift(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       id,
       body,

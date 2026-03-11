@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { Prisma, ShiftStatus } from '@prisma/client';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
@@ -75,18 +75,27 @@ export class ShiftsService {
     userId: string,
     data: { branchId: string; openingCash: number; notes?: string },
   ) {
-    const existing = await this.getOpenShift(businessId, data.branchId);
-    if (existing) {
-      return existing;
-    }
-    const shift = await this.prisma.shift.create({
-      data: {
-        businessId,
-        branchId: data.branchId,
-        openedById: userId,
-        openingCash: new Prisma.Decimal(data.openingCash),
-        notes: data.notes ?? null,
-      },
+    // NOTE: P4-SW1-L6 — The open-shift check is done inside a $transaction to prevent
+    // TOCTOU, but a database-level unique partial index on (branchId, status='OPEN')
+    // would provide a stronger guarantee and eliminate the need for the advisory lock.
+    // Add a migration: CREATE UNIQUE INDEX ... ON shifts (branchId) WHERE status = 'OPEN'.
+    const shift = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.shift.findFirst({
+        where: { businessId, branchId: data.branchId, status: ShiftStatus.OPEN },
+        orderBy: { openedAt: 'desc' },
+      });
+      if (existing) {
+        return existing;
+      }
+      return tx.shift.create({
+        data: {
+          businessId,
+          branchId: data.branchId,
+          openedById: userId,
+          openingCash: new Prisma.Decimal(data.openingCash),
+          notes: data.notes ?? null,
+        },
+      });
     });
     await this.auditService.logEvent({
       businessId,
@@ -106,6 +115,9 @@ export class ShiftsService {
     shiftId: string,
     data: { closingCash: number; varianceReason?: string },
   ) {
+    if (data.closingCash < 0) {
+      throw new BadRequestException('Closing cash amount cannot be negative.');
+    }
     const shift = await this.prisma.shift.findFirst({
       where: { id: shiftId, businessId },
     });

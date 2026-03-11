@@ -29,11 +29,13 @@ export class BusinessStatusGuard implements CanActivate {
 
     const request = context.switchToHttp().getRequest();
     const user = request.user;
-    if (!user?.businessId) {
-      return true;
-    }
+    // Platform/support tokens have no businessId — allow them through first.
     if (user?.scope === 'platform' || user?.scope === 'support') {
       return true;
+    }
+    if (!user?.businessId) {
+      // Authenticated business user with no businessId claim — deny rather than fail open.
+      throw new ForbiddenException('Business context required.');
     }
 
     const business = await this.prisma.business.findUnique({
@@ -41,7 +43,7 @@ export class BusinessStatusGuard implements CanActivate {
       select: { id: true, status: true },
     });
     if (!business) {
-      return true;
+      throw new ForbiddenException('Business not found.');
     }
 
     if (['ARCHIVED', 'DELETED', 'SUSPENDED'].includes(business.status)) {

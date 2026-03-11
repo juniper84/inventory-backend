@@ -2,6 +2,7 @@ import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
 import { OfflineService } from './offline.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('offline')
 export class OfflineController {
@@ -14,8 +15,8 @@ export class OfflineController {
     @Body() body: { userId?: string; deviceName: string; deviceId?: string },
   ) {
     return this.offlineService.registerDevice(
-      req.user?.businessId || '',
-      req.user?.sub ?? body.userId ?? 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body.deviceName,
       body.deviceId,
     );
@@ -28,8 +29,8 @@ export class OfflineController {
     @Body() body: { deviceId: string },
   ) {
     return this.offlineService.revokeDevice(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body.deviceId,
     );
   }
@@ -41,8 +42,8 @@ export class OfflineController {
     @Query('deviceId') deviceId?: string,
   ) {
     return this.offlineService.getStatus(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       deviceId || '',
     );
   }
@@ -50,18 +51,19 @@ export class OfflineController {
   @Get('risk')
   @Permissions(PermissionsList.OFFLINE_READ)
   risk(@Req() req: { user?: { businessId: string } }) {
-    return this.offlineService.getRiskOverview(req.user?.businessId || '');
+    return this.offlineService.getRiskOverview(requireBusinessId(req));
   }
 
   @Get('conflicts')
   @Permissions(PermissionsList.OFFLINE_READ)
   conflicts(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Query('deviceId') deviceId?: string,
     @Query() query?: { limit?: string; cursor?: string },
   ) {
     return this.offlineService.listConflicts(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       deviceId || '',
       query,
     );
@@ -78,8 +80,8 @@ export class OfflineController {
     },
   ) {
     return this.offlineService.resolveConflict(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body.actionId,
       body.resolution ?? 'DISMISS',
     );
@@ -97,8 +99,8 @@ export class OfflineController {
     },
   ) {
     return this.offlineService.recordStatus(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body.deviceId,
       body.status,
       body.since,
@@ -123,8 +125,8 @@ export class OfflineController {
     },
   ) {
     return this.offlineService.syncActions(
-      req.user?.businessId || '',
-      req.user?.sub || body.userId,
+      requireBusinessId(req),
+      requireUserId(req),
       body.deviceId,
       body.actions,
     );

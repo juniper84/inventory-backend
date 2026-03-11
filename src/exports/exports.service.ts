@@ -70,6 +70,9 @@ export class ExportsService {
     return { filename, csv: toCsv(headers, rows) };
   }
 
+  // FIXME: OOM risk — exportOnExitBundle loads all business data in a single transaction
+  // with no pagination. For large businesses with many records this can exhaust server memory.
+  // Add cursor-based pagination and process each table in batches of e.g. 500 rows.
   private async exportOnExitBundle(businessId: string) {
     const [
       business,
@@ -130,6 +133,25 @@ export class ExportsService {
       this.prisma.exportJob.findMany({ where: { businessId } }),
       this.prisma.user.findMany({
         where: { memberships: { some: { businessId } } },
+        // P2-G3-H2: Explicitly exclude passwordHash from exported user records
+        // to prevent credential exposure in the on-exit data bundle.
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          status: true,
+          emailVerifiedAt: true,
+          mustResetPassword: true,
+          passwordUpdatedAt: true,
+          lastLoginAt: true,
+          lastLoginIp: true,
+          lastLoginUserAgent: true,
+          lastLoginDeviceId: true,
+          notificationPreferences: true,
+          createdAt: true,
+          updatedAt: true,
+        },
       }),
       this.prisma.businessUser.findMany({ where: { businessId } }),
       this.prisma.role.findMany({ where: { businessId } }),
@@ -479,9 +501,12 @@ export class ExportsService {
     if (acknowledgement !== 'YES') {
       throw new BadRequestException('Audit export requires acknowledgement.');
     }
+    // P2-G3-H3: Cap audit log export at 10,000 rows to prevent OOM on large businesses.
+    // For full exports, paginated download or S3-backed streaming should be implemented.
     const logs = await this.prisma.auditLog.findMany({
       where: { businessId, ...(branchId ? { branchId } : {}) },
       orderBy: { createdAt: 'desc' },
+      take: 10000,
     });
     const headers = [
       'id',
@@ -655,9 +680,9 @@ export class ExportsService {
     return this.runExportJob(pending.id);
   }
 
-  async runExportJob(jobId: string, acknowledgement?: string) {
+  async runExportJob(jobId: string, businessId?: string, acknowledgement?: string) {
     const existing = await this.prisma.exportJob.findFirst({
-      where: { id: jobId },
+      where: { id: jobId, ...(businessId ? { businessId } : {}) },
     });
     if (!existing) {
       return null;
@@ -849,7 +874,7 @@ export class ExportsService {
       });
       await this.auditService.logEvent({
         businessId: job.businessId,
-        userId: job.requestedByUserId ?? 'system',
+        userId: job.requestedByUserId ?? 'background', // background processor — no direct human actor
         action: 'EXPORT_COMPLETED',
         resourceType: 'ExportJob',
         resourceId: job.id,
@@ -869,7 +894,7 @@ export class ExportsService {
       });
       await this.auditService.logEvent({
         businessId: job.businessId,
-        userId: job.requestedByUserId ?? 'system',
+        userId: job.requestedByUserId ?? 'background', // background processor — no direct human actor
         action: 'EXPORT_FAILED',
         resourceType: 'ExportJob',
         resourceId: job.id,
@@ -881,8 +906,8 @@ export class ExportsService {
     }
   }
 
-  async downloadJob(jobId: string) {
-    const job = await this.prisma.exportJob.findFirst({ where: { id: jobId } });
+  async downloadJob(jobId: string, businessId: string) {
+    const job = await this.prisma.exportJob.findFirst({ where: { id: jobId, businessId } });
     if (!job) {
       return null;
     }

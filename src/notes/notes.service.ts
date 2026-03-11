@@ -310,30 +310,32 @@ export class NotesService {
     const tags = this.normalizeTags(data.tags);
     const resolvedLinks = await this.resolveLinks(businessId, data.links);
 
-    const created = await this.prisma.note.create({
-      data: {
-        businessId,
-        authorId: userId,
-        branchId: data.branchId ?? null,
-        title: data.title.trim(),
-        body: data.body.trim(),
-        visibility,
-        tags,
-      },
-    });
-
-    if (resolvedLinks.length) {
-      await this.prisma.noteLink.createMany({
-        data: resolvedLinks.map((link) => ({
-          noteId: created.id,
+    const created = await this.prisma.$transaction(async (tx) => {
+      const note = await tx.note.create({
+        data: {
           businessId,
-          resourceType: link.resourceType,
-          resourceId: link.resourceId,
-          resourceName: link.resourceName,
-        })),
-        skipDuplicates: true,
+          authorId: userId,
+          branchId: data.branchId ?? null,
+          title: data.title.trim(),
+          body: data.body.trim(),
+          visibility,
+          tags,
+        },
       });
-    }
+      if (resolvedLinks.length) {
+        await tx.noteLink.createMany({
+          data: resolvedLinks.map((link) => ({
+            noteId: note.id,
+            businessId,
+            resourceType: link.resourceType,
+            resourceId: link.resourceId,
+            resourceName: link.resourceName,
+          })),
+          skipDuplicates: true,
+        });
+      }
+      return note;
+    });
 
     await this.auditService.logEvent({
       businessId,
@@ -387,37 +389,39 @@ export class NotesService {
         ? await this.resolveLinks(businessId, data.links)
         : null;
 
-    const updated = await this.prisma.note.update({
-      where: { id: noteId },
-      data: {
-        title: data.title?.trim() ?? existing.title,
-        body: data.body?.trim() ?? existing.body,
-        visibility: (data.visibility ?? existing.visibility) as any,
-        branchId:
-          data.branchId === undefined
-            ? existing.branchId
-            : (data.branchId ?? null),
-        status: (data.status ?? existing.status) as any,
-        ...(tags ? { tags } : {}),
-      },
-    });
-
-    if (resolvedLinks !== null) {
-      await this.prisma.noteLink.deleteMany({
-        where: { noteId, businessId },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const note = await tx.note.update({
+        where: { id: noteId },
+        data: {
+          title: data.title?.trim() ?? existing.title,
+          body: data.body?.trim() ?? existing.body,
+          visibility: (data.visibility ?? existing.visibility) as any,
+          branchId:
+            data.branchId === undefined
+              ? existing.branchId
+              : (data.branchId ?? null),
+          status: (data.status ?? existing.status) as any,
+          ...(tags ? { tags } : {}),
+        },
       });
-      if (resolvedLinks.length) {
-        await this.prisma.noteLink.createMany({
-          data: resolvedLinks.map((link) => ({
-            noteId,
-            businessId,
-            resourceType: link.resourceType,
-            resourceId: link.resourceId,
-            resourceName: link.resourceName,
-          })),
-        });
+
+      if (resolvedLinks !== null) {
+        await tx.noteLink.deleteMany({ where: { noteId, businessId } });
+        if (resolvedLinks.length) {
+          await tx.noteLink.createMany({
+            data: resolvedLinks.map((link) => ({
+              noteId,
+              businessId,
+              resourceType: link.resourceType,
+              resourceId: link.resourceId,
+              resourceName: link.resourceName,
+            })),
+          });
+        }
       }
-    }
+
+      return note;
+    });
 
     await this.auditService.logEvent({
       businessId,

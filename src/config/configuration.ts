@@ -1,7 +1,14 @@
-export default () => ({
+export default () => {
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    throw new Error(
+      'JWT_SECRET environment variable must be set. Refusing to start with an insecure default.',
+    );
+  }
+  return {
   port: parseInt(process.env.PORT || '3000', 10),
   jwt: {
-    secret: process.env.JWT_SECRET || 'change-me',
+    secret: jwtSecret,
     expiresIn: process.env.JWT_EXPIRES_IN || '15m',
     refreshDays: process.env.JWT_REFRESH_DAYS || '30',
   },
@@ -94,7 +101,8 @@ export default () => ({
     escalationContact:
       process.env.SUPPORT_CHAT_ESCALATION_CONTACT ||
       process.env.SUPPORT_EMAIL ||
-      process.env.PLATFORM_ADMIN_EMAIL ||
       'support@newvisioninventory.com',
+    llmModel: process.env.SUPPORT_CHAT_LLM_MODEL || process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini',
   },
-});
+  };
+};

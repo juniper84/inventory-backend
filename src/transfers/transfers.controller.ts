@@ -12,6 +12,8 @@ import {
 import { TransfersService } from './transfers.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
+import { VALID_CURRENCY_CODES } from '../common/currency-codes';
 
 @Controller('transfers')
 export class TransfersController {
@@ -31,7 +33,7 @@ export class TransfersController {
     },
   ) {
     return this.transfersService.listPending(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -54,7 +56,7 @@ export class TransfersController {
     },
   ) {
     return this.transfersService.list(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -93,9 +95,12 @@ export class TransfersController {
     if (body.items.some((item) => Number.isNaN(Number(item.quantity)))) {
       throw new BadRequestException('item quantity must be a number.');
     }
+    if (body.feeCurrency && !VALID_CURRENCY_CODES.has(body.feeCurrency.toUpperCase())) {
+      throw new BadRequestException('Invalid fee currency code.');
+    }
     return this.transfersService.create(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -123,9 +128,9 @@ export class TransfersController {
       );
     }
     return this.transfersService.approve(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || 'system',
+      requireUserId(req),
       req.user?.roleIds || [],
       req.user?.branchScope ?? [],
     );
@@ -154,9 +159,9 @@ export class TransfersController {
       );
     }
     return this.transfersService.receive(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || 'system',
+      requireUserId(req),
       body?.items,
       body?.idempotencyKey,
       req.user?.branchScope ?? [],
@@ -181,9 +186,9 @@ export class TransfersController {
       );
     }
     return this.transfersService.cancel(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || 'system',
+      requireUserId(req),
       req.user?.branchScope ?? [],
     );
   }

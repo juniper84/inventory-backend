@@ -8,10 +8,14 @@ import {
 import { ImportsService } from './imports.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('imports')
 export class ImportsController {
   constructor(private readonly importsService: ImportsService) {}
+
+  // P2-G2-M3: Maximum allowed CSV size is 10 MB to prevent OOM during parsing.
+  private static readonly MAX_CSV_BYTES = 10 * 1024 * 1024;
 
   @Post('preview')
   @Permissions(PermissionsList.EXPORTS_WRITE)
@@ -35,7 +39,10 @@ export class ImportsController {
     if (!body.type || !body.csv) {
       throw new BadRequestException('type and csv are required.');
     }
-    return this.importsService.preview(req.user?.businessId || '', body);
+    if (Buffer.byteLength(body.csv, 'utf8') > ImportsController.MAX_CSV_BYTES) {
+      throw new BadRequestException('CSV file exceeds the 10 MB size limit.');
+    }
+    return this.importsService.preview(requireBusinessId(req), body);
   }
 
   @Post('apply')
@@ -60,9 +67,12 @@ export class ImportsController {
     if (!body.type || !body.csv) {
       throw new BadRequestException('type and csv are required.');
     }
+    if (Buffer.byteLength(body.csv, 'utf8') > ImportsController.MAX_CSV_BYTES) {
+      throw new BadRequestException('CSV file exceeds the 10 MB size limit.');
+    }
     return this.importsService.apply(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }

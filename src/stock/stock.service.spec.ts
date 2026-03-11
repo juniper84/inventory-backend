@@ -17,11 +17,14 @@ describe('StockService', () => {
     } as any;
     const notificationsService = { create: jest.fn() } as any;
 
+    const unitsService = {} as any;
+
     const service = new StockService(
       prisma,
       auditService,
       approvalsService,
       notificationsService,
+      unitsService,
     );
 
     await service.createAdjustment('business-1', 'user-1', [], {

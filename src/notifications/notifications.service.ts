@@ -196,9 +196,14 @@ export class NotificationsService {
     );
   }
 
-  async markRead(businessId: string, notificationId: string) {
+  async markRead(businessId: string, notificationId: string, userId: string) {
     const notification = await this.prisma.notification.findFirst({
-      where: { id: notificationId, businessId, archivedAt: null },
+      where: {
+        id: notificationId,
+        businessId,
+        OR: [{ userId }, { userId: null }],
+        archivedAt: null,
+      },
     });
     if (!notification) {
       return null;
@@ -219,10 +224,11 @@ export class NotificationsService {
     return updated;
   }
 
-  async markAllRead(businessId: string) {
+  async markAllRead(businessId: string, userId: string) {
     const result = await this.prisma.notification.updateMany({
       where: {
         businessId,
+        OR: [{ userId }, { userId: null }],
         status: { not: NotificationStatus.READ },
         archivedAt: null,
       },
@@ -231,13 +237,14 @@ export class NotificationsService {
     return { count: result.count };
   }
 
-  async markBulkRead(businessId: string, ids: string[]) {
+  async markBulkRead(businessId: string, userId: string, ids: string[]) {
     if (!ids.length) {
       return { count: 0 };
     }
     const result = await this.prisma.notification.updateMany({
       where: {
         businessId,
+        OR: [{ userId }, { userId: null }],
         id: { in: ids },
         archivedAt: null,
       },
@@ -246,13 +253,14 @@ export class NotificationsService {
     return { count: result.count };
   }
 
-  async archiveBulk(businessId: string, ids: string[]) {
+  async archiveBulk(businessId: string, userId: string, ids: string[]) {
     if (!ids.length) {
       return { count: 0 };
     }
     const result = await this.prisma.notification.updateMany({
       where: {
         businessId,
+        OR: [{ userId }, { userId: null }],
         id: { in: ids },
         archivedAt: null,
       },

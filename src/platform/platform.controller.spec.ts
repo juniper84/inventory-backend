@@ -226,7 +226,7 @@ describe('PlatformController', () => {
         idempotencyKey: 'idem-purge',
       },
     );
-    await controller.purgeBusinessPreflight('biz-2', { reason: 'request' });
+    await controller.purgeBusinessPreflight({ user: { sub: 'admin-2' } }, 'biz-2', { reason: 'request' });
 
     expect(platformService.purgeBusiness).toHaveBeenCalledWith(
       'biz-2',
@@ -240,6 +240,7 @@ describe('PlatformController', () => {
     );
     expect(platformService.getPurgePreflight).toHaveBeenCalledWith(
       'biz-2',
+      'admin-2',
       'request',
     );
   });

@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import { SupportAccessService } from './support-access.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('support-access')
 export class SupportAccessController {
@@ -14,7 +15,7 @@ export class SupportAccessController {
     @Query() query: { limit?: string; cursor?: string; status?: string },
   ) {
     return this.supportAccessService.listRequestsForBusiness(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
     );
   }
@@ -27,9 +28,9 @@ export class SupportAccessController {
     @Body() body: { durationHours?: number; decisionNote?: string },
   ) {
     return this.supportAccessService.approveRequest({
-      businessId: req.user?.businessId || '',
+      businessId: requireBusinessId(req),
       requestId: id,
-      approvedByUserId: req.user?.sub || '',
+      approvedByUserId: requireUserId(req),
       durationHours: body.durationHours,
       decisionNote: body.decisionNote,
     });
@@ -43,9 +44,9 @@ export class SupportAccessController {
     @Body() body: { decisionNote?: string },
   ) {
     return this.supportAccessService.rejectRequest({
-      businessId: req.user?.businessId || '',
+      businessId: requireBusinessId(req),
       requestId: id,
-      approvedByUserId: req.user?.sub || '',
+      approvedByUserId: requireUserId(req),
       decisionNote: body.decisionNote,
     });
   }

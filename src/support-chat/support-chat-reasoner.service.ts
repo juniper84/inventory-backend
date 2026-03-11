@@ -29,7 +29,7 @@ type ContextPayload = {
 type RetrievalResult = {
   id: string;
   route: string;
-  section: 'purpose' | 'prerequisites' | 'workflow' | 'errors' | 'links';
+  section: 'purpose' | 'prerequisites' | 'workflow' | 'errors' | 'links' | 'warnings' | 'elements';
   error_codes: string[];
   text: string;
 };
@@ -47,12 +47,19 @@ type ManualEntry = {
   route: string;
   locale: ManualLocale;
   title: string;
+  // v1 fields — optional, may be absent in v2 entries
   purpose?: string;
   workflow?: { step: string; expected_result?: string; if_blocked?: string }[];
-  prerequisites: { check: string; where_to_do_it?: string }[];
-  common_errors: { error_code: string; likely_cause: string; fix_steps: string[] }[];
-  related_pages: { route: string; reason: string; order: string }[];
+  prerequisites?: { check: string; where_to_do_it?: string }[];
+  common_errors?: { error_code: string; likely_cause: string; fix_steps: string[] }[];
+  related_pages?: { route: string; reason: string; order: string }[];
   permissions_required?: string[];
+  // v2 fields
+  overview?: string;
+  before_you_start?: { text: string; link?: string }[];
+  common_tasks?: { task: string; steps: string[] }[];
+  warnings?: string[];
+  elements?: { name: string; type: string; description: string; notes?: string }[];
 };
 
 type ManualDataset = {
@@ -421,7 +428,7 @@ export class SupportChatReasonerService {
     entry: ManualEntry;
     readiness: Record<string, unknown>;
   }) {
-    const beforePages = input.entry.related_pages.filter(
+    const beforePages = (input.entry.related_pages ?? []).filter(
       (item) => item.order?.toLowerCase() === 'before',
     );
     if (!beforePages.length) {
@@ -581,8 +588,12 @@ export class SupportChatReasonerService {
         required.add(normalized);
       }
     }
-    for (const prerequisite of input.entry.prerequisites) {
-      const parsedCodes = this.extractPermissionCodes(prerequisite.check);
+    const prereqChecks = [
+      ...(input.entry.prerequisites ?? []).map((item) => item.check),
+      ...(input.entry.before_you_start ?? []).map((item) => item.text),
+    ];
+    for (const check of prereqChecks) {
+      const parsedCodes = this.extractPermissionCodes(check);
       for (const code of parsedCodes) {
         required.add(code);
       }
@@ -662,7 +673,10 @@ export class SupportChatReasonerService {
     entry: ManualEntry;
     readiness: Record<string, unknown>;
   }) {
-    const checks = input.entry.prerequisites.map((item) => item.check.toLowerCase());
+    const checks = [
+      ...(input.entry.prerequisites ?? []).map((item) => item.check),
+      ...(input.entry.before_you_start ?? []).map((item) => item.text),
+    ].map((text) => text.toLowerCase());
     const categoriesCount = this.asNumber(input.readiness.categories_count);
     const hasOpenShift = this.asBoolean(input.readiness.has_open_shift_in_active_branch);
     const hasSuppliers = this.asBoolean(input.readiness.has_suppliers);
@@ -810,7 +824,7 @@ export class SupportChatReasonerService {
       };
     }
 
-    const matched = input.entry.common_errors.find((item) =>
+    const matched = (input.entry.common_errors ?? []).find((item) =>
       this.errorCodeMatches(normalizedCode, item.error_code),
     );
     if (!matched) {
@@ -930,7 +944,7 @@ export class SupportChatReasonerService {
         }
       | null = null;
 
-    for (const item of input.entry.common_errors) {
+    for (const item of (input.entry.common_errors ?? [])) {
       const corpus = [item.error_code, item.likely_cause, ...(item.fix_steps ?? [])].join(' ');
       const overlap = this.semanticOverlapStats(queryTokens, corpus);
       const score = overlap.weighted;
@@ -960,9 +974,10 @@ export class SupportChatReasonerService {
       sameRoute: boolean;
     }> = [];
 
-    if (input.entry.purpose) {
+    const purposeText = input.entry.overview ?? input.entry.purpose ?? null;
+    if (purposeText) {
       localDependencyCorpora.push({
-        text: input.entry.purpose,
+        text: purposeText,
         actions:
           input.locale === 'sw'
             ? ['Anza na lengo la ukurasa huu kisha fuata hatua za kazi kwa mpangilio.']
@@ -971,29 +986,33 @@ export class SupportChatReasonerService {
         sameRoute: true,
       });
     }
-    for (const step of input.entry.workflow ?? []) {
-      const text = [step.step, step.expected_result, step.if_blocked]
-        .filter(Boolean)
-        .join(' ');
-      if (!text) {
-        continue;
-      }
+    const workflowItems: Array<{ text: string; actions: string[] }> = [
+      ...(input.entry.workflow ?? []).map((step) => ({
+        text: [step.step, step.expected_result, step.if_blocked].filter(Boolean).join(' '),
+        actions: [step.step, ...(step.if_blocked ? [step.if_blocked] : [])].slice(0, 3),
+      })),
+      ...(input.entry.common_tasks ?? []).map((task) => ({
+        text: [task.task, ...task.steps].join(' '),
+        actions: task.steps.slice(0, 3),
+      })),
+    ];
+    for (const item of workflowItems) {
+      if (!item.text) continue;
       localDependencyCorpora.push({
-        text,
-        actions: [
-          step.step,
-          ...(step.if_blocked ? [step.if_blocked] : []),
-        ].slice(0, 3),
+        text: item.text,
+        actions: item.actions,
         section: 'workflow',
         sameRoute: true,
       });
     }
-    for (const prereq of input.entry.prerequisites ?? []) {
-      if (!prereq.check) {
-        continue;
-      }
+    const semanticPrereqs = [
+      ...(input.entry.prerequisites ?? []).map((item) => item.check),
+      ...(input.entry.before_you_start ?? []).map((item) => item.text),
+    ];
+    for (const text of semanticPrereqs) {
+      if (!text) continue;
       localDependencyCorpora.push({
-        text: prereq.check,
+        text,
         actions:
           input.locale === 'sw'
             ? ['Kagua masharti ya awali ya ukurasa huu, kisha jaribu tena hatua uliyokuwa unafanya.']

@@ -4,9 +4,10 @@ import { UsersService } from './users.service';
 import { SubscriptionModule } from '../subscription/subscription.module';
 import { MailerModule } from '../mailer/mailer.module';
 import { I18nModule } from '../i18n/i18n.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-  imports: [SubscriptionModule, MailerModule, I18nModule],
+  imports: [SubscriptionModule, MailerModule, I18nModule, NotificationsModule],
   controllers: [UsersController],
   providers: [UsersService],
   exports: [UsersService],

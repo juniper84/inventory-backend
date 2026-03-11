@@ -11,6 +11,7 @@ import {
 import { ApprovalsService } from './approvals.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller()
 export class ApprovalsController {
@@ -29,7 +30,7 @@ export class ApprovalsController {
     },
   ) {
     return this.approvalsService.listPolicies(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
     );
   }
@@ -37,7 +38,7 @@ export class ApprovalsController {
   @Post('approval-policies')
   @Permissions(PermissionsList.APPROVALS_WRITE)
   createPolicy(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       actionType: string;
@@ -47,13 +48,13 @@ export class ApprovalsController {
       allowSelfApprove?: boolean;
     },
   ) {
-    return this.approvalsService.createPolicy(req.user?.businessId || '', body);
+    return this.approvalsService.createPolicy(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Put('approval-policies/:id')
   @Permissions(PermissionsList.APPROVALS_WRITE)
   updatePolicy(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Param('id') id: string,
     @Body()
     body: {
@@ -64,7 +65,8 @@ export class ApprovalsController {
     },
   ) {
     return this.approvalsService.updatePolicy(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
       body,
     );
@@ -73,16 +75,16 @@ export class ApprovalsController {
   @Post('approval-policies/:id/archive')
   @Permissions(PermissionsList.APPROVALS_WRITE)
   archivePolicy(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Param('id') id: string,
   ) {
-    return this.approvalsService.archivePolicy(req.user?.businessId || '', id);
+    return this.approvalsService.archivePolicy(requireBusinessId(req), requireUserId(req), id);
   }
 
   @Get('approvals')
   @Permissions(PermissionsList.APPROVALS_READ)
   listApprovals(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Query()
     query: {
       limit?: string;
@@ -96,7 +98,8 @@ export class ApprovalsController {
     },
   ) {
     return this.approvalsService.listApprovals(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       query,
     );
   }
@@ -108,9 +111,9 @@ export class ApprovalsController {
     @Param('id') id: string,
   ) {
     return this.approvalsService.approve(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || '',
+      requireUserId(req),
     );
   }
 
@@ -122,9 +125,9 @@ export class ApprovalsController {
     @Body() body: { reason?: string },
   ) {
     return this.approvalsService.reject(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || '',
+      requireUserId(req),
       body.reason,
     );
   }

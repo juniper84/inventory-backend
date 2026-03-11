@@ -82,17 +82,18 @@ export class OfflineService {
       throw new ForbiddenException('User not active for this business.');
     }
 
-    await this.subscriptionService.assertLimit(businessId, 'offlineDevices');
-
+    // Resolve permissions before the transaction (service call with its own queries)
     const access = await this.rbacService.resolveUserAccess(userId, businessId);
-    const existing = deviceId
-      ? await this.prisma.offlineDevice.findFirst({
-          where: { id: deviceId, businessId, userId },
-        })
-      : null;
 
-    const device = existing
-      ? await this.prisma.offlineDevice.update({
+    const device = await this.prisma.$transaction(async (tx) => {
+      const existing = deviceId
+        ? await tx.offlineDevice.findFirst({
+            where: { id: deviceId, businessId, userId },
+          })
+        : null;
+
+      if (existing) {
+        return tx.offlineDevice.update({
           where: { id: existing.id },
           data: {
             deviceName,
@@ -100,18 +101,27 @@ export class OfflineService {
             revokedAt: null,
             permissionsSnapshot: access as Prisma.InputJsonValue,
           },
-        })
-      : await this.prisma.offlineDevice.create({
-          data: {
-            id: deviceId,
-            businessId,
-            userId,
-            deviceName,
-            deviceKey: `dev-${Date.now()}`,
-            status: OfflineDeviceStatus.ACTIVE,
-            permissionsSnapshot: access as Prisma.InputJsonValue,
-          },
         });
+      }
+
+      await this.subscriptionService.assertLimit(
+        businessId,
+        'offlineDevices',
+        1,
+        tx,
+      );
+      return tx.offlineDevice.create({
+        data: {
+          id: deviceId,
+          businessId,
+          userId,
+          deviceName,
+          deviceKey: `dev-${Date.now()}`,
+          status: OfflineDeviceStatus.ACTIVE,
+          permissionsSnapshot: access as Prisma.InputJsonValue,
+        },
+      });
+    });
 
     await this.auditService.logEvent({
       businessId,
@@ -268,6 +278,7 @@ export class OfflineService {
 
   async listConflicts(
     businessId: string,
+    userId: string,
     deviceId: string,
     query: PaginationQuery = {},
   ) {
@@ -276,6 +287,7 @@ export class OfflineService {
       .findMany({
         where: {
           businessId,
+          userId,
           deviceId,
           status: {
             in: [OfflineActionStatus.CONFLICT, OfflineActionStatus.REJECTED],
@@ -309,19 +321,29 @@ export class OfflineService {
       conflictPayload?: Record<string, unknown>;
       errorMessage?: string | null;
     }) => {
-      const updated = await this.prisma.offlineAction.update({
-        where: { id: actionId },
-        data: {
-          status: result.status,
-          syncedAt: new Date(),
-          appliedAt:
-            result.status === OfflineActionStatus.APPLIED ? new Date() : null,
-          conflictReason: result.conflictReason ?? null,
-          conflictPayload: result.conflictPayload
-            ? (result.conflictPayload as Prisma.InputJsonValue)
-            : Prisma.DbNull,
-          errorMessage: result.errorMessage ?? null,
-        },
+      // Re-validate status inside $transaction to prevent double-decision race (Fix P4-C-H6)
+      const updated = await this.prisma.$transaction(async (tx) => {
+        const current = await tx.offlineAction.findUnique({
+          where: { id: actionId },
+          select: { status: true },
+        });
+        if (current?.status === OfflineActionStatus.APPLIED) {
+          return tx.offlineAction.findUnique({ where: { id: actionId } });
+        }
+        return tx.offlineAction.update({
+          where: { id: actionId },
+          data: {
+            status: result.status,
+            syncedAt: new Date(),
+            appliedAt:
+              result.status === OfflineActionStatus.APPLIED ? new Date() : null,
+            conflictReason: result.conflictReason ?? null,
+            conflictPayload: result.conflictPayload
+              ? (result.conflictPayload as Prisma.InputJsonValue)
+              : Prisma.DbNull,
+            errorMessage: result.errorMessage ?? null,
+          },
+        });
       });
       await this.auditService.logEvent({
         businessId,
@@ -380,10 +402,75 @@ export class OfflineService {
         throw new BadRequestException('Approval not found.');
       }
       if (approval.status === 'APPROVED') {
+        // Re-fetch current permissions — this is a deferred resolution, permissions may
+        // have changed since the action was originally queued.
+        const access = await this.rbacService.resolveUserAccess(userId, businessId);
+        const permissions = access.permissions;
+        const roleIds = access.roleIds;
+
+        const requiredPermission = this.getActionPermission(
+          action.actionType as OfflineActionInput['actionType'],
+        );
+        if (requiredPermission && !permissions.includes(requiredPermission)) {
+          return finalize({
+            status: OfflineActionStatus.REJECTED,
+            conflictReason: 'PERMISSION_REVOKED',
+            errorMessage: 'Permission revoked for action.',
+          });
+        }
+
+        const actionPayload = action.payload as Record<string, unknown>;
+        let executionResult: {
+          status: OfflineActionStatus;
+          result?: Record<string, unknown>;
+          conflictReason?: string | null;
+          conflictPayload?: Record<string, unknown>;
+          errorMessage?: string | null;
+        };
+
+        switch (action.actionType) {
+          case 'SALE_COMPLETE':
+            // Allow price variance — the approval gate has already been cleared.
+            executionResult = await this.applySale(
+              businessId,
+              userId,
+              action.deviceId,
+              permissions,
+              roleIds,
+              actionPayload,
+              { allowPriceVariance: true },
+            );
+            break;
+          case 'STOCK_ADJUSTMENT':
+            executionResult = await this.applyStockAdjustment(
+              businessId,
+              userId,
+              roleIds,
+              actionPayload,
+            );
+            break;
+          default:
+            executionResult = {
+              status: OfflineActionStatus.REJECTED,
+              errorMessage: 'Unsupported action type for approval sync.',
+            };
+        }
+
+        // Guard against a second APPROVAL_REQUIRED loop (should not happen, but be safe).
+        if (executionResult.conflictReason === 'APPROVAL_REQUIRED') {
+          return finalize({
+            status: OfflineActionStatus.CONFLICT,
+            conflictReason: action.conflictReason,
+            conflictPayload,
+            errorMessage: 'Action still requires approval after re-execution.',
+          });
+        }
+
         return finalize({
-          status: OfflineActionStatus.APPLIED,
-          conflictReason: null,
-          conflictPayload,
+          status: executionResult.status,
+          conflictReason: executionResult.conflictReason ?? null,
+          conflictPayload: executionResult.conflictPayload ?? conflictPayload,
+          errorMessage: executionResult.errorMessage ?? null,
         });
       }
       if (approval.status === 'REJECTED') {
@@ -557,12 +644,26 @@ export class OfflineService {
     }
   }
 
+  // Hard caps per entity to prevent OOM on large catalogs. These are high enough
+  // to cover virtually all real businesses while bounding peak memory usage.
+  private static readonly CACHE_LIMITS = {
+    products: 5_000,
+    variants: 10_000,
+    barcodes: 15_000,
+    customers: 5_000,
+    suppliers: 2_000,
+    snapshots: 20_000,
+    batches: 5_000,
+    priceLists: 200,
+  } as const;
+
   private async buildOfflineCache(businessId: string, userId: string) {
     const settings = await this.settingsService.getSettings(businessId);
     const stockPolicies = settings?.stockPolicies as {
       batchTrackingEnabled?: boolean;
     };
     const access = await this.rbacService.resolveUserAccess(userId, businessId);
+    const L = OfflineService.CACHE_LIMITS;
     const [
       branches,
       products,
@@ -575,6 +676,7 @@ export class OfflineService {
       priceLists,
       suppliers,
     ] = await Promise.all([
+      // Branches and units are small sets — no cap needed.
       this.prisma.branch.findMany({
         where: { businessId, status: 'ACTIVE' },
         select: { id: true, name: true, priceListId: true },
@@ -582,6 +684,8 @@ export class OfflineService {
       this.prisma.product.findMany({
         where: { businessId, status: 'ACTIVE' },
         select: { id: true, name: true, categoryId: true },
+        take: L.products,
+        orderBy: { createdAt: 'asc' },
       }),
       this.prisma.variant.findMany({
         where: { businessId, status: 'ACTIVE' },
@@ -598,6 +702,8 @@ export class OfflineService {
           sellUnitId: true,
           conversionFactor: true,
         },
+        take: L.variants,
+        orderBy: { createdAt: 'asc' },
       }),
       this.prisma.unit.findMany({
         where: { OR: [{ businessId }, { businessId: null }] },
@@ -612,6 +718,8 @@ export class OfflineService {
       this.prisma.barcode.findMany({
         where: { businessId, isActive: true },
         select: { id: true, variantId: true, code: true, isActive: true },
+        take: L.barcodes,
+        orderBy: { createdAt: 'asc' },
       }),
       stockPolicies?.batchTrackingEnabled
         ? this.prisma.batch.findMany({
@@ -623,6 +731,8 @@ export class OfflineService {
               code: true,
               expiryDate: true,
             },
+            take: L.batches,
+            orderBy: { createdAt: 'asc' },
           })
         : Promise.resolve([]),
       this.prisma.stockSnapshot.findMany({
@@ -634,20 +744,37 @@ export class OfflineService {
           quantity: true,
           inTransitQuantity: true,
         },
+        take: L.snapshots,
+        orderBy: { updatedAt: 'desc' },
       }),
       this.prisma.customer.findMany({
         where: { businessId, status: 'ACTIVE' },
         select: { id: true, name: true, priceListId: true },
+        take: L.customers,
+        orderBy: { createdAt: 'asc' },
       }),
       this.prisma.priceList.findMany({
         where: { businessId, status: 'ACTIVE' },
         include: { items: true },
+        take: L.priceLists,
       }),
       this.prisma.supplier.findMany({
         where: { businessId, status: 'ACTIVE' },
         select: { id: true, name: true },
+        take: L.suppliers,
+        orderBy: { createdAt: 'asc' },
       }),
     ]);
+
+    // Surface a truncation flag so the frontend can warn the user when the
+    // cache is incomplete (they should contact support to clean up inactive data).
+    const truncated =
+      products.length === L.products ||
+      variants.length === L.variants ||
+      barcodes.length === L.barcodes ||
+      customers.length === L.customers ||
+      snapshots.length === L.snapshots;
+
     return {
       branches,
       products,
@@ -664,6 +791,7 @@ export class OfflineService {
         posPolicies: settings?.posPolicies,
         stockPolicies: settings?.stockPolicies,
       },
+      meta: { truncated, cacheBuiltAt: new Date().toISOString() },
     };
   }
 
@@ -737,9 +865,51 @@ export class OfflineService {
     };
     const varianceThreshold = posPolicies?.offlinePriceVariancePercent ?? 3;
     const variantIds = lines.map((line) => line.variantId);
+
+    // Verify branch, customer, and variants are still active before executing.
+    const activeBranch = await this.prisma.branch.findFirst({
+      where: { id: branchId, businessId, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    if (!activeBranch) {
+      return {
+        status: OfflineActionStatus.REJECTED,
+        conflictReason: 'BRANCH_INACTIVE',
+        errorMessage: `Branch ${branchId} is no longer active.`,
+      };
+    }
+
+    if (customerId) {
+      const activeCustomer = await this.prisma.customer.findFirst({
+        where: { id: customerId, businessId, status: 'ACTIVE' },
+        select: { id: true },
+      });
+      if (!activeCustomer) {
+        return {
+          status: OfflineActionStatus.REJECTED,
+          conflictReason: 'CUSTOMER_INACTIVE',
+          errorMessage: `Customer ${customerId} is no longer active.`,
+        };
+      }
+    }
+
+    const activeVariants = await this.prisma.variant.findMany({
+      where: { businessId, id: { in: variantIds }, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    const activeVariantIds = new Set(activeVariants.map((v) => v.id));
+    const inactiveVariantId = variantIds.find((id) => !activeVariantIds.has(id));
+    if (inactiveVariantId) {
+      return {
+        status: OfflineActionStatus.REJECTED,
+        conflictReason: 'VARIANT_INACTIVE',
+        errorMessage: `Variant ${inactiveVariantId} is no longer active.`,
+      };
+    }
+
     const variants = await this.prisma.variant.findMany({
       where: { businessId, id: { in: variantIds } },
-      select: { id: true, defaultPrice: true },
+      select: { id: true, defaultPrice: true, vatMode: true },
     });
     const priceMap = new Map(
       variants.map((variant) => [
@@ -747,6 +917,22 @@ export class OfflineService {
         Number(variant.defaultPrice ?? 0),
       ]),
     );
+    const vatModeMap = new Map(
+      variants.map((variant) => [variant.id, variant.vatMode]),
+    );
+    const vatChangedLine = lines.find(
+      (line) =>
+        line.vatMode !== undefined &&
+        vatModeMap.has(line.variantId) &&
+        vatModeMap.get(line.variantId) !== line.vatMode,
+    );
+    if (vatChangedLine) {
+      return {
+        status: OfflineActionStatus.CONFLICT,
+        conflictReason: 'VAT_CHANGED',
+        errorMessage: `VAT mode for variant ${vatChangedLine.variantId} changed since cache was built.`,
+      };
+    }
     const varianceBreaches = lines
       .map((line) => {
         const current = priceMap.get(line.variantId) ?? 0;
@@ -960,9 +1146,20 @@ export class OfflineService {
       subscription.status === 'EXPIRED' ||
       subscription.status === 'SUSPENDED'
     ) {
-      throw new ForbiddenException(
-        'Offline mode is disabled for this subscription.',
-      );
+      // Soft-reject: return per-action REJECTED results instead of throwing.
+      // This preserves the client queue so the user's work is not silently lost.
+      return {
+        results: actions.map((action) => ({
+          id: 'subscription-expired',
+          actionType: action.actionType,
+          checksum: action.checksum,
+          localAuditId: action.localAuditId ?? null,
+          status: OfflineActionStatus.REJECTED,
+          conflictReason: 'SUBSCRIPTION_EXPIRED',
+          errorMessage:
+            'Subscription expired or suspended. Actions retained on device.',
+        })),
+      };
     }
     const membership = await this.prisma.businessUser.findUnique({
       where: { businessId_userId: { businessId, userId } },
@@ -1158,19 +1355,29 @@ export class OfflineService {
           };
       }
 
-      await this.prisma.offlineAction.update({
-        where: { id: record.id },
-        data: {
-          status: result.status,
-          syncedAt: new Date(),
-          appliedAt:
-            result.status === OfflineActionStatus.APPLIED ? new Date() : null,
-          conflictReason: result.conflictReason ?? null,
-          conflictPayload: result.conflictPayload
-            ? (result.conflictPayload as Prisma.InputJsonValue)
-            : Prisma.DbNull,
-          errorMessage: result.errorMessage ?? null,
-        },
+      // Re-check status inside $transaction before writing to prevent double-processing (Fix P4-C-H7)
+      await this.prisma.$transaction(async (tx) => {
+        const current = await tx.offlineAction.findUnique({
+          where: { id: record.id },
+          select: { status: true },
+        });
+        if (current?.status !== OfflineActionStatus.PENDING) {
+          return; // already processed by a concurrent request
+        }
+        await tx.offlineAction.update({
+          where: { id: record.id },
+          data: {
+            status: result.status,
+            syncedAt: new Date(),
+            appliedAt:
+              result.status === OfflineActionStatus.APPLIED ? new Date() : null,
+            conflictReason: result.conflictReason ?? null,
+            conflictPayload: result.conflictPayload
+              ? (result.conflictPayload as Prisma.InputJsonValue)
+              : Prisma.DbNull,
+            errorMessage: result.errorMessage ?? null,
+          },
+        });
       });
 
       await this.auditService.logEvent({

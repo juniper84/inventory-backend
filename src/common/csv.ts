@@ -58,10 +58,11 @@ function splitCsvLine(line: string) {
 }
 
 function escapeCsv(value: string) {
-  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
-    return `"${value.replace(/"/g, '""')}"`;
+  const prefixed = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  if (prefixed.includes(',') || prefixed.includes('"') || prefixed.includes('\n')) {
+    return `"${prefixed.replace(/"/g, '""')}"`;
   }
-  return value;
+  return prefixed;
 }
 
 export type { CsvRow };

@@ -72,7 +72,10 @@ export class SettingsService {
 
     if (roleIds.size) {
       const assignments = await this.prisma.userRole.findMany({
-        where: { roleId: { in: Array.from(roleIds) } },
+        where: {
+          roleId: { in: Array.from(roleIds) },
+          user: { memberships: { some: { businessId } } },
+        },
         select: { userId: true },
       });
       for (const assignment of assignments) {
@@ -170,7 +173,7 @@ export class SettingsService {
       return;
     }
     await this.prisma.approvalPolicy.update({
-      where: { id: existing.id },
+      where: { id: existing.id, businessId },
       data: {
         thresholdType: data.thresholdType,
         thresholdValue:
@@ -314,6 +317,10 @@ export class SettingsService {
 
   async updateSettings(
     businessId: string,
+    userId: string,
+    // G2-H8: Only explicitly-typed keys are accepted here — this typed DTO acts as an
+    // allowlist. Only these 6 top-level settings sections can be updated. Any extra
+    // fields on the raw request body are stripped by NestJS's ValidationPipe (whitelist: true).
     data: {
       approvalDefaults?: Record<string, unknown>;
       notificationDefaults?: Record<string, unknown>;
@@ -326,6 +333,43 @@ export class SettingsService {
     const existing = await this.prisma.businessSettings.findUnique({
       where: { businessId },
     });
+
+    // Validate offline limits against the business's subscription tier caps.
+    const offlineLimitsInput = (data.posPolicies as Record<string, unknown> | undefined)
+      ?.offlineLimits as Record<string, number> | undefined;
+    if (offlineLimitsInput) {
+      const OFFLINE_CAPS: Record<string, { maxDurationHours: number; maxSalesCount: number; maxTotalValue: number }> = {
+        STARTER:    { maxDurationHours: 0,   maxSalesCount: 0,    maxTotalValue: 0       },
+        BUSINESS:   { maxDurationHours: 72,  maxSalesCount: 200,  maxTotalValue: 5000000 },
+        ENTERPRISE: { maxDurationHours: 168, maxSalesCount: 2000, maxTotalValue: 5000000 },
+      };
+      const sub = await this.prisma.subscription.findUnique({
+        where: { businessId },
+        select: { tier: true },
+      });
+      const tier = sub?.tier ?? 'STARTER';
+      const cap = OFFLINE_CAPS[tier] ?? OFFLINE_CAPS.STARTER;
+      if (cap.maxDurationHours === 0 && (
+        (offlineLimitsInput.maxDurationHours ?? 0) > 0 ||
+        (offlineLimitsInput.maxSalesCount ?? 0) > 0 ||
+        (offlineLimitsInput.maxTotalValue ?? 0) > 0
+      )) {
+        throw new BadRequestException({
+          errorCode: 'OFFLINE_NOT_AVAILABLE',
+          message: 'Offline mode is not available on your current subscription plan.',
+        });
+      }
+      if (
+        (typeof offlineLimitsInput.maxDurationHours === 'number' && offlineLimitsInput.maxDurationHours > cap.maxDurationHours) ||
+        (typeof offlineLimitsInput.maxSalesCount === 'number' && offlineLimitsInput.maxSalesCount > cap.maxSalesCount) ||
+        (typeof offlineLimitsInput.maxTotalValue === 'number' && offlineLimitsInput.maxTotalValue > cap.maxTotalValue)
+      ) {
+        throw new BadRequestException({
+          errorCode: 'OFFLINE_LIMITS_EXCEEDED',
+          message: 'Offline limits exceed the maximum allowed for your subscription tier.',
+        });
+      }
+    }
 
     if (!existing) {
       const created = await this.prisma.businessSettings.create({
@@ -349,7 +393,7 @@ export class SettingsService {
       });
       await this.auditService.logEvent({
         businessId,
-        userId: 'system',
+        userId,
         action: 'SETTINGS_CREATE',
         resourceType: 'BusinessSettings',
         resourceId: created.id,
@@ -428,7 +472,7 @@ export class SettingsService {
     });
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'SETTINGS_UPDATE',
       resourceType: 'BusinessSettings',
       resourceId: updated.id,

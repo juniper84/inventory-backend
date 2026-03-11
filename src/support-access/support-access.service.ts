@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import crypto from 'crypto';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -177,6 +177,9 @@ export class SupportAccessService {
     if (!session) {
       throw new BadRequestException('Session not found.');
     }
+    if (session.platformAdminId !== data.platformAdminId) {
+      throw new ForbiddenException('Cannot revoke another admin\'s session.');
+    }
     if (session.revokedAt) {
       return session;
     }
@@ -223,33 +226,33 @@ export class SupportAccessService {
     durationHours?: number;
     decisionNote?: string;
   }) {
-    const request = await this.prisma.supportAccessRequest.findUnique({
-      where: { id: data.requestId },
-    });
-
-    if (!request || request.businessId !== data.businessId) {
-      throw new BadRequestException('Request not found.');
-    }
-
-    if (request.status !== 'PENDING') {
-      throw new BadRequestException('Request already resolved.');
-    }
-
-    const requestedDuration = request.durationHours ?? null;
-    const resolvedDuration =
-      data.durationHours ?? requestedDuration ?? DEFAULT_SUPPORT_ACCESS_HOURS;
-    const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + resolvedDuration);
-
-    const updated = await this.prisma.supportAccessRequest.update({
-      where: { id: request.id },
-      data: {
-        status: 'APPROVED',
-        decidedAt: new Date(),
-        expiresAt,
-        decisionNote: data.decisionNote ?? null,
-        approvedByUserId: data.approvedByUserId,
-      },
+    // Wrap status check + write in $transaction to prevent double-decision race (Fix P4-D-H10)
+    const txResult = await this.prisma.$transaction(async (tx) => {
+      const request = await tx.supportAccessRequest.findUnique({
+        where: { id: data.requestId },
+      });
+      if (!request || request.businessId !== data.businessId) {
+        throw new BadRequestException('Request not found.');
+      }
+      if (request.status !== 'PENDING') {
+        throw new BadRequestException('Request already resolved.');
+      }
+      const requestedDuration = request.durationHours ?? null;
+      const resolvedDuration =
+        data.durationHours ?? requestedDuration ?? DEFAULT_SUPPORT_ACCESS_HOURS;
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + resolvedDuration);
+      const updated = await tx.supportAccessRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'APPROVED',
+          decidedAt: new Date(),
+          expiresAt,
+          decisionNote: data.decisionNote ?? null,
+          approvedByUserId: data.approvedByUserId,
+        },
+      });
+      return { updated, request, resolvedDuration, expiresAt };
     });
 
     await this.auditService.logEvent({
@@ -257,16 +260,16 @@ export class SupportAccessService {
       userId: data.approvedByUserId,
       action: 'SUPPORT_ACCESS_APPROVE',
       resourceType: 'SupportAccessRequest',
-      resourceId: request.id,
+      resourceId: txResult.request.id,
       outcome: 'SUCCESS',
       metadata: {
-        expiresAt,
-        scope: request.scope ?? null,
-        durationHours: resolvedDuration,
+        expiresAt: txResult.expiresAt,
+        scope: txResult.request.scope ?? null,
+        durationHours: txResult.resolvedDuration,
       },
     });
 
-    return updated;
+    return txResult.updated;
   }
 
   async rejectRequest(data: {
@@ -275,26 +278,27 @@ export class SupportAccessService {
     approvedByUserId: string;
     decisionNote?: string;
   }) {
-    const request = await this.prisma.supportAccessRequest.findUnique({
-      where: { id: data.requestId },
-    });
-
-    if (!request || request.businessId !== data.businessId) {
-      throw new BadRequestException('Request not found.');
-    }
-
-    if (request.status !== 'PENDING') {
-      throw new BadRequestException('Request already resolved.');
-    }
-
-    const updated = await this.prisma.supportAccessRequest.update({
-      where: { id: request.id },
-      data: {
-        status: 'REJECTED',
-        decidedAt: new Date(),
-        decisionNote: data.decisionNote ?? null,
-        approvedByUserId: data.approvedByUserId,
-      },
+    // Wrap status check + write in $transaction to prevent double-decision race (Fix P4-D-H10)
+    const txResult = await this.prisma.$transaction(async (tx) => {
+      const request = await tx.supportAccessRequest.findUnique({
+        where: { id: data.requestId },
+      });
+      if (!request || request.businessId !== data.businessId) {
+        throw new BadRequestException('Request not found.');
+      }
+      if (request.status !== 'PENDING') {
+        throw new BadRequestException('Request already resolved.');
+      }
+      const updated = await tx.supportAccessRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'REJECTED',
+          decidedAt: new Date(),
+          decisionNote: data.decisionNote ?? null,
+          approvedByUserId: data.approvedByUserId,
+        },
+      });
+      return { updated, request };
     });
 
     await this.auditService.logEvent({
@@ -302,12 +306,12 @@ export class SupportAccessService {
       userId: data.approvedByUserId,
       action: 'SUPPORT_ACCESS_REJECT',
       resourceType: 'SupportAccessRequest',
-      resourceId: request.id,
+      resourceId: txResult.request.id,
       outcome: 'SUCCESS',
       metadata: { decisionNote: data.decisionNote ?? null },
     });
 
-    return updated;
+    return txResult.updated;
   }
 
   async activateRequest(data: { requestId: string; platformAdminId: string }) {
@@ -323,26 +327,33 @@ export class SupportAccessService {
       throw new BadRequestException('Request is not approved.');
     }
 
-    if (request.expiresAt < new Date()) {
-      await this.prisma.supportAccessRequest.update({
-        where: { id: request.id },
-        data: { status: 'EXPIRED' },
-      });
-      throw new BadRequestException('Request expired.');
-    }
-
     const token = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-    await this.prisma.supportAccessSession.create({
-      data: {
-        requestId: request.id,
-        businessId: request.businessId,
-        platformAdminId: request.platformAdminId,
-        tokenHash,
-        expiresAt: request.expiresAt,
-        scope: request.scope ?? undefined,
-      },
+    await this.prisma.$transaction(async (tx) => {
+      const current = await tx.supportAccessRequest.findUnique({
+        where: { id: request.id },
+      });
+      if (!current || current.status !== 'APPROVED' || !current.expiresAt) {
+        throw new BadRequestException('Request is not approved.');
+      }
+      if (current.expiresAt < new Date()) {
+        await tx.supportAccessRequest.update({
+          where: { id: request.id },
+          data: { status: 'EXPIRED' },
+        });
+        throw new BadRequestException('Request expired.');
+      }
+      await tx.supportAccessSession.create({
+        data: {
+          requestId: request.id,
+          businessId: request.businessId,
+          platformAdminId: request.platformAdminId,
+          tokenHash,
+          expiresAt: request.expiresAt ?? new Date(Date.now() + 8 * 60 * 60 * 1000),
+          scope: request.scope ?? undefined,
+        },
+      });
     });
 
     await this.auditService.logEvent({

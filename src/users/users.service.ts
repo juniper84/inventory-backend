@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import crypto from 'crypto';
 import { AuditService } from '../audit/audit.service';
@@ -14,6 +14,7 @@ import {
   PaginationQuery,
 } from '../common/pagination';
 import { Prisma } from '@prisma/client';
+import { NotificationStreamService } from '../notifications/notification-stream.service';
 
 @Injectable()
 export class UsersService {
@@ -24,7 +25,20 @@ export class UsersService {
     private readonly mailerService: MailerService,
     private readonly i18n: I18nService,
     private readonly configService: ConfigService,
+    private readonly notificationStream: NotificationStreamService,
   ) {}
+
+  private async getUserMaxTier(userId: string, businessId: string): Promise<number> {
+    const userRoles = await this.prisma.userRole.findMany({
+      where: { userId, role: { businessId } },
+      select: { role: { select: { approvalTier: true } } },
+    });
+    let max = 0;
+    for (const ur of userRoles) {
+      max = Math.max(max, ur.role.approvalTier);
+    }
+    return max;
+  }
 
   private normalizeUserNotificationPreferences(
     raw: Record<string, unknown> | null | undefined,
@@ -125,6 +139,7 @@ export class UsersService {
 
   async create(
     businessId: string,
+    actorId: string,
     data: {
       name: string;
       email: string;
@@ -134,41 +149,46 @@ export class UsersService {
       mustResetPassword?: boolean;
     },
   ) {
-    await this.subscriptionService.assertLimit(businessId, 'users');
-    let user = await this.prisma.user.findFirst({
-      where: { email: data.email },
-    });
+    // Pre-compute password hash outside the transaction (CPU-bound work)
+    const passwordHash = hashPassword(
+      data.tempPassword ?? crypto.randomBytes(12).toString('hex'),
+    );
 
-    if (!user) {
-      user = await this.prisma.user.create({
-        data: {
-          name: data.name,
-          email: data.email,
-          phone: data.phone ?? null,
-          passwordHash: hashPassword(
-            data.tempPassword ?? crypto.randomBytes(12).toString('hex'),
-          ),
-          mustResetPassword: data.mustResetPassword ?? true,
-          status: data.status as any,
+    const { user, membership } = await this.prisma.$transaction(async (tx) => {
+      await this.subscriptionService.assertLimit(businessId, 'users', 1, tx);
+
+      let user = await tx.user.findFirst({ where: { email: data.email } });
+      if (!user) {
+        user = await tx.user.create({
+          data: {
+            name: data.name,
+            email: data.email,
+            phone: data.phone ?? null,
+            passwordHash,
+            mustResetPassword: data.mustResetPassword ?? true,
+            status: data.status as any,
+          },
+        });
+      }
+
+      const membership = await tx.businessUser.upsert({
+        where: { businessId_userId: { businessId, userId: user.id } },
+        create: {
+          businessId,
+          userId: user.id,
+          status: (data.status as any) ?? 'ACTIVE',
+        },
+        update: {
+          status: (data.status as any) ?? 'ACTIVE',
         },
       });
-    }
 
-    const membership = await this.prisma.businessUser.upsert({
-      where: { businessId_userId: { businessId, userId: user.id } },
-      create: {
-        businessId,
-        userId: user.id,
-        status: (data.status as any) ?? 'ACTIVE',
-      },
-      update: {
-        status: (data.status as any) ?? 'ACTIVE',
-      },
+      return { user, membership };
     });
 
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId: actorId,
       action: 'USER_CREATE',
       resourceType: 'User',
       resourceId: user.id,
@@ -189,6 +209,7 @@ export class UsersService {
   async update(
     businessId: string,
     userId: string,
+    actorId: string,
     data: {
       name?: string;
       email?: string;
@@ -208,31 +229,35 @@ export class UsersService {
     if (!before) {
       return null;
     }
-    const result = await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        name: data.name,
-        email: data.email,
-        phone: data.phone ?? undefined,
-        notificationPreferences:
-          data.notificationPreferences === undefined
-            ? undefined
-            : (this.normalizeUserNotificationPreferences(
-                data.notificationPreferences,
-              ) as any),
-        status: data.status as any,
-      },
-    });
-
-    if (data.status) {
-      await this.prisma.businessUser.update({
-        where: { businessId_userId: { businessId, userId } },
-        data: { status: data.status as any },
+    const result = await this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({
+        where: { id: userId },
+        data: {
+          name: data.name,
+          email: data.email,
+          phone: data.phone ?? undefined,
+          notificationPreferences:
+            data.notificationPreferences === undefined
+              ? undefined
+              : (this.normalizeUserNotificationPreferences(
+                  data.notificationPreferences,
+                ) as any),
+          // status is intentionally not updated here — it is a global field affecting
+          // login across all businesses. Per-business membership status is handled
+          // exclusively via businessUser.status below.
+        },
       });
-    }
+      if (data.status) {
+        await tx.businessUser.update({
+          where: { businessId_userId: { businessId, userId } },
+          data: { status: data.status as any },
+        });
+      }
+      return user;
+    });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId: actorId,
       action: 'USER_UPDATE',
       resourceType: 'User',
       resourceId: userId,
@@ -244,20 +269,70 @@ export class UsersService {
     return result;
   }
 
-  async deactivate(businessId: string, userId: string) {
-    const membership = await this.prisma.businessUser.update({
-      where: { businessId_userId: { businessId, userId } },
-      data: { status: 'DEACTIVATED' },
+  async deactivate(businessId: string, userId: string, actorId: string) {
+    // Prevent self-deactivation (Fix P3-G1-C5)
+    if (actorId === userId) {
+      throw new ForbiddenException('You cannot deactivate your own account.');
+    }
+    const membership = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.businessUser.update({
+        where: { businessId_userId: { businessId, userId } },
+        data: { status: 'DEACTIVATED' },
+      });
+      // Revoke all refresh tokens for this user so they cannot obtain new
+      // access tokens after deactivation.
+      await tx.refreshToken.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      return updated;
     });
+    // Push the user out of any active SSE session immediately.
+    this.notificationStream.emitForceLogout([userId], 'deactivated');
+    // Fire-and-forget email — deactivation is already committed.
+    void this.sendDeactivationEmail(businessId, userId);
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId: actorId,
       action: 'USER_DEACTIVATE',
       resourceType: 'User',
       resourceId: userId,
       outcome: 'SUCCESS',
     });
     return membership;
+  }
+
+  private async sendDeactivationEmail(businessId: string, userId: string) {
+    try {
+      const [user, business] = await Promise.all([
+        this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { email: true, name: true },
+        }),
+        this.prisma.business.findUnique({
+          where: { id: businessId },
+          select: { name: true },
+        }),
+      ]);
+      if (!user?.email) return;
+      const businessName = business?.name ?? 'your organization';
+      const userName = user.name ?? '';
+      await this.mailerService.sendEmail({
+        to: user.email,
+        subject: `Your account on ${businessName} has been deactivated`,
+        text: [
+          userName ? `Hi ${userName},` : 'Hi,',
+          '',
+          `Your account on ${businessName} has been deactivated by a system administrator.`,
+          '',
+          'If you believe this is a mistake, please contact your system owner directly.',
+          '',
+          'New Vision Inventory',
+        ].join('\n'),
+      });
+    } catch {
+      // Non-critical — deactivation is already committed, email failure is silent.
+    }
   }
 
   async invite(
@@ -270,6 +345,14 @@ export class UsersService {
     });
     if (!role || role.name === 'System Owner') {
       return null;
+    }
+    if (data.createdById) {
+      const inviterTier = await this.getUserMaxTier(data.createdById, businessId);
+      if (role.approvalTier >= inviterTier) {
+        throw new ForbiddenException(
+          'You can only invite users to roles below your own level.',
+        );
+      }
     }
     const token = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
@@ -316,15 +399,22 @@ export class UsersService {
       }),
       preheader: this.i18n.t(locale, 'email.invite.title'),
     });
-    await this.mailerService.sendEmail({
-      to: data.email,
-      ...invitePayload,
-    });
+    // If email send fails, roll back the invitation so the token is never orphaned (Fix P3-G1-H9)
+    try {
+      await this.mailerService.sendEmail({
+        to: data.email,
+        ...invitePayload,
+      });
+    } catch (emailError) {
+      await this.prisma.invitation.delete({ where: { id: invitation.id } });
+      throw emailError;
+    }
 
-    return { invitation, token };
+    // Do NOT return the raw token — it was delivered by email only (Fix P3-G8-C2)
+    return { id: invitation.id, email: invitation.email, businessId: invitation.businessId };
   }
 
-  async acceptInvite(data: { token: string; name: string; password: string }) {
+  async acceptInvite(data: { token: string; name: string; password: string; email?: string }) {
     if (!validatePassword(data.password)) {
       return null;
     }
@@ -340,53 +430,73 @@ export class UsersService {
       return null;
     }
 
-    await this.subscriptionService.assertLimit(invitation.businessId, 'users');
-
-    const existing = await this.prisma.user.findFirst({
-      where: { email: invitation.email },
-    });
-
-    if (existing) {
+    // Verify the caller's email matches the invitation email (Fix P3-G1-C3)
+    if (data.email && data.email.toLowerCase() !== invitation.email.toLowerCase()) {
       return null;
     }
 
-    const user = await this.prisma.user.create({
-      data: {
-        name: data.name,
-        email: invitation.email,
-        passwordHash: hashPassword(data.password),
-        status: 'ACTIVE',
-        emailVerifiedAt: new Date(),
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        status: true,
-        mustResetPassword: true,
-        createdAt: true,
-      },
+    // Pre-compute password hash outside the transaction (CPU-bound work)
+    const passwordHash = hashPassword(data.password);
+
+    const user = await this.prisma.$transaction(async (tx) => {
+      await this.subscriptionService.assertLimit(
+        invitation.businessId,
+        'users',
+        1,
+        tx,
+      );
+
+      const existing = await tx.user.findFirst({
+        where: { email: invitation.email },
+      });
+      if (existing) {
+        throw new ConflictException('A user with this email already exists.');
+      }
+
+      const user = await tx.user.create({
+        data: {
+          name: data.name,
+          email: invitation.email,
+          passwordHash,
+          status: 'ACTIVE',
+          emailVerifiedAt: new Date(),
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          status: true,
+          mustResetPassword: true,
+          createdAt: true,
+        },
+      });
+
+      await tx.businessUser.create({
+        data: {
+          businessId: invitation.businessId,
+          userId: user.id,
+          status: 'ACTIVE',
+        },
+      });
+
+      await tx.userRole.create({
+        data: {
+          userId: user.id,
+          roleId: invitation.roleId,
+        },
+      });
+
+      await tx.invitation.update({
+        where: { id: invitation.id },
+        data: { acceptedAt: new Date() },
+      });
+
+      return user;
     });
 
-    await this.prisma.businessUser.create({
-      data: {
-        businessId: invitation.businessId,
-        userId: user.id,
-        status: 'ACTIVE',
-      },
-    });
-
-    await this.prisma.userRole.create({
-      data: {
-        userId: user.id,
-        roleId: invitation.roleId,
-      },
-    });
-
-    await this.prisma.invitation.update({
-      where: { id: invitation.id },
-      data: { acceptedAt: new Date() },
-    });
+    if (!user) {
+      return null;
+    }
 
     await this.auditService.logEvent({
       businessId: invitation.businessId,
@@ -467,6 +577,7 @@ export class UsersService {
     businessId: string,
     userId: string,
     roleId: string,
+    actorId: string,
     branchId?: string | null,
   ) {
     const membership = await this.prisma.businessUser.findUnique({
@@ -484,6 +595,12 @@ export class UsersService {
     if (role.name === 'System Owner') {
       return null;
     }
+    const actorTier = await this.getUserMaxTier(actorId, businessId);
+    if (role.approvalTier >= actorTier) {
+      throw new ForbiddenException(
+        'You can only assign roles below your own level.',
+      );
+    }
     if (branchId) {
       const branch = await this.prisma.branch.findFirst({
         where: { id: branchId, businessId },
@@ -492,31 +609,44 @@ export class UsersService {
         return null;
       }
     }
-    const result = await this.prisma.userRole.create({
-      data: {
-        userId,
-        roleId,
-        branchId: branchId ?? null,
-      },
-      include: { role: true, branch: true },
-    });
-    this.auditService.logEvent({
-      businessId,
-      userId: 'system',
-      action: 'USER_ROLE_ASSIGN',
-      resourceType: 'UserRole',
-      resourceId: result.id,
-      outcome: 'SUCCESS',
-      reason: 'User role assigned',
-      metadata: { userId, roleId, branchId: branchId ?? null },
-    });
-    return result;
+
+    try {
+      const result = await this.prisma.userRole.create({
+        data: {
+          userId,
+          roleId,
+          branchId: branchId ?? null,
+        },
+        include: { role: true, branch: true },
+      });
+      this.auditService.logEvent({
+        businessId,
+        userId: actorId,
+        action: 'USER_ROLE_ASSIGN',
+        resourceType: 'UserRole',
+        resourceId: result.id,
+        outcome: 'SUCCESS',
+        reason: 'User role assigned',
+        metadata: { userId, roleId, branchId: branchId ?? null },
+      });
+      return result;
+    } catch (error) {
+      // Idempotency: if concurrent request already created this role assignment, return existing
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return this.prisma.userRole.findFirst({
+          where: { userId, roleId, branchId: branchId ?? null },
+          include: { role: true, branch: true },
+        });
+      }
+      throw error;
+    }
   }
 
   async removeUserRole(
     businessId: string,
     userId: string,
     roleId: string,
+    actorId: string,
     branchId?: string | null,
   ) {
     const role = await this.prisma.role.findFirst({
@@ -536,7 +666,7 @@ export class UsersService {
     if (deleted.count > 0) {
       this.auditService.logEvent({
         businessId,
-        userId: 'system',
+        userId: actorId,
         action: 'USER_ROLE_REMOVE',
         resourceType: 'UserRole',
         resourceId: `${userId}:${roleId}:${branchValue ?? 'global'}`,

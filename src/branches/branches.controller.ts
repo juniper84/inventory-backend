@@ -12,6 +12,7 @@ import {
 import { BranchesService } from './branches.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('branches')
 export class BranchesController {
@@ -30,7 +31,7 @@ export class BranchesController {
     },
   ) {
     return this.branchesService.list(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -39,7 +40,7 @@ export class BranchesController {
   @Post()
   @Permissions(PermissionsList.SETTINGS_WRITE)
   create(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       name: string;
@@ -51,14 +52,14 @@ export class BranchesController {
     if (!body.name?.trim()) {
       throw new BadRequestException('name is required.');
     }
-    return this.branchesService.create(req.user?.businessId || '', body);
+    return this.branchesService.create(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Put(':id')
   @Permissions(PermissionsList.SETTINGS_WRITE)
   update(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       name?: string;
@@ -67,6 +68,6 @@ export class BranchesController {
       priceListId?: string | null;
     },
   ) {
-    return this.branchesService.update(req.user?.businessId || '', id, body);
+    return this.branchesService.update(requireBusinessId(req), id, requireUserId(req), body);
   }
 }

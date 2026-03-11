@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -358,6 +358,8 @@ function computeDiff(
 
 @Injectable()
 export class AuditService {
+  private readonly logger = new Logger(AuditService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditContext: AuditContextStore,
@@ -369,7 +371,12 @@ export class AuditService {
       ...(context?.metadata ?? {}),
       ...(event.metadata ?? {}),
     };
-    const businessId = event.businessId ?? context?.businessId ?? '';
+    // Reject empty-string businessId — callers must pass a real ID, 'unknown', or a sentinel (Fix P4-C-H3)
+    const rawBusinessId = event.businessId ?? context?.businessId;
+    if (rawBusinessId === '') {
+      this.logger.warn(`logEvent called with empty businessId for action=${event.action}`);
+    }
+    const businessId = rawBusinessId || 'unknown';
     const timestamp = event.timestamp ?? new Date().toISOString();
     const requestId =
       event.requestId ??

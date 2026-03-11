@@ -56,7 +56,27 @@ export class PermissionsGuard implements CanActivate {
       addValue(params.branchId);
       addValue(query.branchId);
 
-      if (candidateIds.size > 0) {
+      if (candidateIds.size === 0) {
+        // Branch-scoped write operations must always specify a branchId
+        const isWriteMethod = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(
+          request.method,
+        );
+        if (isWriteMethod) {
+          await this.auditService.logEvent({
+            businessId: request.user?.businessId,
+            userId: request.user?.sub,
+            action: 'BRANCH_SCOPE_CHECK',
+            resourceType: 'Branch',
+            outcome: 'FAILURE',
+            metadata: {
+              reason: 'No branchId provided for branch-scoped write operation',
+              branchScope,
+              ...buildRequestMetadata(request),
+            },
+          });
+          throw new ForbiddenException('Branch-scoped role restriction.');
+        }
+      } else {
         const inScope = Array.from(candidateIds).every((id) =>
           branchScope.includes(id),
         );

@@ -7,12 +7,15 @@ import {
   Query,
   Req,
   Sse,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { NotificationsService } from './notifications.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
 import { NotificationStreamService } from './notification-stream.service';
 import { Public } from '../auth/public.decorator';
+import { JwtPayload } from '../auth/auth.types';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('notifications')
 export class NotificationsController {
@@ -48,8 +51,8 @@ export class NotificationsController {
     },
   ) {
     return this.notificationsService.list(
-      req.user?.businessId || '',
-      req.user?.sub,
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds ?? [],
       req.user?.branchScope ?? [],
       req.user?.permissions ?? [],
@@ -61,25 +64,33 @@ export class NotificationsController {
   @Permissions(PermissionsList.NOTIFICATIONS_READ)
   markRead(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
   ) {
-    return this.notificationsService.markRead(req.user?.businessId || '', id);
+    return this.notificationsService.markRead(
+      requireBusinessId(req),
+      id,
+      requireUserId(req),
+    );
   }
 
   @Post('read-all')
   @Permissions(PermissionsList.NOTIFICATIONS_READ)
-  markAllRead(@Req() req: { user?: { businessId: string } }) {
-    return this.notificationsService.markAllRead(req.user?.businessId || '');
+  markAllRead(@Req() req: { user?: { businessId: string; sub?: string } }) {
+    return this.notificationsService.markAllRead(
+      requireBusinessId(req),
+      requireUserId(req),
+    );
   }
 
   @Post('read-bulk')
   @Permissions(PermissionsList.NOTIFICATIONS_READ)
   markBulkRead(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { ids?: string[] },
   ) {
     return this.notificationsService.markBulkRead(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       body.ids ?? [],
     );
   }
@@ -87,11 +98,12 @@ export class NotificationsController {
   @Post('archive-bulk')
   @Permissions(PermissionsList.NOTIFICATIONS_READ)
   archiveBulk(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { ids?: string[] },
   ) {
     return this.notificationsService.archiveBulk(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       body.ids ?? [],
     );
   }
@@ -99,13 +111,23 @@ export class NotificationsController {
   @Get('announcement')
   getAnnouncement(@Req() req: { user?: { businessId: string } }) {
     return this.notificationsService.getActiveAnnouncement(
-      req.user?.businessId,
+      requireBusinessId(req),
     );
+  }
+
+  @Post('stream-token')
+  @Permissions(PermissionsList.NOTIFICATIONS_READ)
+  async getStreamToken(@Req() req: { user?: JwtPayload }) {
+    if (!req.user) {
+      throw new UnauthorizedException();
+    }
+    const token = await this.notificationStream.generateStreamToken(req.user);
+    return { token };
   }
 
   @Sse('stream')
   @Public()
-  stream(@Query('token') token?: string) {
+  async stream(@Query('token') token?: string) {
     return this.notificationStream.createStream(token ?? '');
   }
 }

@@ -16,6 +16,7 @@ model Business {
   createdAt                   DateTime                             @default(now())
   updatedAt                   DateTime                             @updatedAt
   lastActivityAt              DateTime?
+  forceLogoutAt               DateTime?
   reviewReason                String?
   reviewedAt                  DateTime?
   underReview                 Boolean                              @default(false)
@@ -50,6 +51,7 @@ model Business {
   productImages               ProductImage[]
   purchases                   Purchase[]
   purchaseOrders              PurchaseOrder[]
+  receipts                    Receipt[]
   reorderPoints               ReorderPoint[]
   roles                       Role[]
   sales                       Sale[]
@@ -155,8 +157,8 @@ model BusinessUser {
   status     UserStatus @default(PENDING)
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
-  business   Business   @relation(fields: [businessId], references: [id])
-  user       User       @relation(fields: [userId], references: [id])
+  business   Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([businessId, userId])
   @@index([businessId, status])
@@ -173,9 +175,22 @@ model PlatformAdmin {
   subscriptionRequests  SubscriptionRequest[]
   supportAccessRequests SupportAccessRequest[]
   supportAccessSessions SupportAccessSession[]
-  createdIncidents      PlatformIncident[]      @relation("PlatformIncidentCreatedBy")
-  ownedIncidents        PlatformIncident[]      @relation("PlatformIncidentOwner")
+  createdIncidents      PlatformIncident[]           @relation("PlatformIncidentCreatedBy")
+  ownedIncidents        PlatformIncident[]           @relation("PlatformIncidentOwner")
   incidentEvents        PlatformIncidentEvent[]
+  refreshTokens         PlatformAdminRefreshToken[]
+}
+
+model PlatformAdminRefreshToken {
+  id               String        @id @default(uuid())
+  platformAdminId  String
+  tokenHash        String
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime      @default(now())
+  platformAdmin    PlatformAdmin @relation(fields: [platformAdminId], references: [id], onDelete: Cascade)
+
+  @@index([platformAdminId])
 }
 
 model Unit {
@@ -234,7 +249,7 @@ model BusinessSettings {
   rateLimitOverride     Json?
   onboarding            Json?
   onboardingCompletedAt DateTime?
-  business              Business  @relation(fields: [businessId], references: [id])
+  business              Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
 }
 
 model EmailVerificationToken {
@@ -244,7 +259,7 @@ model EmailVerificationToken {
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime  @default(now())
-  user      User      @relation(fields: [userId], references: [id])
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
@@ -351,6 +366,7 @@ model ExportJob {
   business                   Business        @relation(fields: [businessId], references: [id])
 
   @@index([businessId, branchId])
+  @@index([businessId, status])
 }
 
 model SubscriptionHistory {
@@ -483,7 +499,7 @@ model Subscription {
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
   graceReminderSentAt DateTime?
-  business            Business           @relation(fields: [businessId], references: [id])
+  business            Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
 }
 
 model SubscriptionRequest {
@@ -514,7 +530,7 @@ model RefreshToken {
   replacedBy String?
   createdAt  DateTime  @default(now())
   deviceId   String?
-  user       User      @relation(fields: [userId], references: [id])
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
@@ -526,7 +542,9 @@ model PasswordResetToken {
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime  @default(now())
-  user      User      @relation(fields: [userId], references: [id])
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Invitation {
@@ -541,7 +559,7 @@ model Invitation {
   createdById String?
   business    Business  @relation(fields: [businessId], references: [id])
   createdBy   User?     @relation("InvitationCreatedBy", fields: [createdById], references: [id])
-  role        Role      @relation(fields: [roleId], references: [id])
+  role        Role      @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@index([businessId, email])
 }
@@ -664,6 +682,7 @@ model AuditLog {
   @@index([businessId, createdAt])
   @@index([businessId, requestId])
   @@index([businessId, correlationId])
+  @@index([userId])
 }
 
 model IdempotencyKey {
@@ -686,6 +705,7 @@ model Role {
   businessId      String
   name            String
   isSystem        Boolean          @default(false)
+  approvalTier    Int              @default(0)
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   invitations     Invitation[]
@@ -693,6 +713,8 @@ model Role {
   business        Business         @relation(fields: [businessId], references: [id])
   rolePermissions RolePermission[]
   userRoles       UserRole[]
+
+  @@index([businessId])
 }
 
 model Permission {
@@ -707,7 +729,7 @@ model RolePermission {
   roleId       String
   permissionId String
   permission   Permission @relation(fields: [permissionId], references: [id])
-  role         Role       @relation(fields: [roleId], references: [id])
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@unique([roleId, permissionId])
 }
@@ -792,10 +814,11 @@ model UserRole {
   roleId   String
   branchId String?
   branch   Branch? @relation(fields: [branchId], references: [id])
-  role     Role    @relation(fields: [roleId], references: [id])
-  user     User    @relation(fields: [userId], references: [id])
+  role     Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, roleId, branchId])
+  @@index([roleId])
 }
 
 model Category {
@@ -810,6 +833,9 @@ model Category {
   parent     Category?    @relation("CategoryParent", fields: [parentId], references: [id])
   children   Category[]   @relation("CategoryParent")
   products   Product[]
+
+  @@index([businessId])
+  @@index([businessId, name])
 }
 
 model Product {
@@ -825,6 +851,9 @@ model Product {
   category    Category?      @relation(fields: [categoryId], references: [id])
   images      ProductImage[]
   variants    Variant[]
+
+  @@index([businessId])
+  @@index([businessId, name])
 }
 
 model Variant {
@@ -960,6 +989,8 @@ model StockMovement {
   createdBy    User?             @relation(fields: [createdById], references: [id])
   unit         Unit?             @relation(fields: [unitId], references: [id])
   variant      Variant           @relation(fields: [variantId], references: [id])
+
+  @@index([businessId, branchId, variantId])
 }
 
 model StockSnapshot {
@@ -994,6 +1025,8 @@ model Transfer {
   destinationBranch   Branch         @relation("TransferDestinationBranch", fields: [destinationBranchId], references: [id])
   sourceBranch        Branch         @relation("TransferSourceBranch", fields: [sourceBranchId], references: [id])
   items               TransferItem[]
+
+  @@index([businessId, status])
 }
 
 model TransferItem {
@@ -1116,6 +1149,8 @@ model SaleLine {
   sale            Sale     @relation(fields: [saleId], references: [id])
   unit            Unit?    @relation(fields: [unitId], references: [id])
   variant         Variant  @relation(fields: [variantId], references: [id])
+
+  @@index([saleId])
 }
 
 model SalePayment {
@@ -1126,15 +1161,22 @@ model SalePayment {
   reference   String?
   methodLabel String?
   sale        Sale          @relation(fields: [saleId], references: [id])
+
+  @@index([saleId])
 }
 
 model Receipt {
   id            String   @id @default(uuid())
   saleId        String   @unique
-  receiptNumber String   @unique
+  businessId    String
+  receiptNumber String
   issuedAt      DateTime @default(now())
   data          Json?
+  business      Business @relation(fields: [businessId], references: [id])
   sale          Sale     @relation(fields: [saleId], references: [id])
+
+  @@unique([businessId, receiptNumber])
+  @@index([businessId, issuedAt])
 }
 
 model SaleRefund {
@@ -1159,6 +1201,8 @@ model SaleRefund {
   customer              Customer?        @relation(fields: [customerId], references: [id])
   sale                  Sale?            @relation(fields: [saleId], references: [id])
   lines                 SaleRefundLine[]
+
+  @@index([businessId, status])
 }
 
 model SaleRefundLine {
@@ -1176,6 +1220,8 @@ model SaleRefundLine {
   refund     SaleRefund @relation(fields: [refundId], references: [id])
   unit       Unit?      @relation(fields: [unitId], references: [id])
   variant    Variant    @relation(fields: [variantId], references: [id])
+
+  @@index([refundId])
 }
 
 model SaleSettlement {
@@ -1254,6 +1300,8 @@ model Supplier {
   purchaseOrders  PurchaseOrder[]
   business        Business         @relation(fields: [businessId], references: [id])
   supplierReturns SupplierReturn[]
+
+  @@unique([businessId, name])
 }
 
 model Purchase {
@@ -1275,6 +1323,8 @@ model Purchase {
   payments        PurchasePayment[]
   receivings      ReceivingLine[]
   supplierReturns SupplierReturn[]
+
+  @@index([businessId, status])
 }
 
 model PurchaseLine {
@@ -1288,6 +1338,8 @@ model PurchaseLine {
   purchase   Purchase @relation(fields: [purchaseId], references: [id])
   unit       Unit?    @relation(fields: [unitId], references: [id])
   variant    Variant  @relation(fields: [variantId], references: [id])
+
+  @@index([purchaseId])
 }
 
 model PurchaseOrder {
@@ -1308,6 +1360,8 @@ model PurchaseOrder {
   lines           PurchaseOrderLine[]
   receivings      ReceivingLine[]
   supplierReturns SupplierReturn[]
+
+  @@index([businessId, status])
 }
 
 model PurchaseOrderLine {
@@ -1321,6 +1375,8 @@ model PurchaseOrderLine {
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
   unit            Unit?         @relation(fields: [unitId], references: [id])
   variant         Variant       @relation(fields: [variantId], references: [id])
+
+  @@index([purchaseOrderId])
 }
 
 model ReceivingLine {
@@ -1341,6 +1397,9 @@ model ReceivingLine {
   unit                Unit?                @relation(fields: [unitId], references: [id])
   variant             Variant              @relation(fields: [variantId], references: [id])
   supplierReturnLines SupplierReturnLine[]
+
+  @@index([purchaseId])
+  @@index([purchaseOrderId])
 }
 
 model Attachment {
@@ -1360,6 +1419,8 @@ model Attachment {
   business        Business         @relation(fields: [businessId], references: [id])
   purchase        Purchase?        @relation(fields: [purchaseId], references: [id])
   purchaseOrder   PurchaseOrder?   @relation(fields: [purchaseOrderId], references: [id])
+
+  @@index([purchaseId])
 }
 
 model PurchasePayment {
@@ -1394,6 +1455,8 @@ model SupplierReturn {
   purchaseOrder   PurchaseOrder?       @relation(fields: [purchaseOrderId], references: [id])
   supplier        Supplier             @relation(fields: [supplierId], references: [id])
   lines           SupplierReturnLine[]
+
+  @@index([businessId, status])
 }
 
 model SupplierReturnLine {
@@ -1428,6 +1491,12 @@ enum UserStatus {
   PENDING
 }
 
+// Soft-delete pattern:
+//   Most models use `status: RecordStatus` (ACTIVE → INACTIVE/ARCHIVED) as the
+//   primary soft-delete mechanism. Some models additionally carry an `archivedAt`
+//   timestamp — this is NOT redundant; it records when archival happened for audit
+//   purposes and is indexed for TTL-style queries. The status field remains the
+//   authoritative "is this record visible?" signal.
 enum RecordStatus {
   ACTIVE
   INACTIVE

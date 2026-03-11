@@ -2,6 +2,7 @@ import { Controller, Get, Query, Req } from '@nestjs/common';
 import { SearchService } from './search.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId } from '../common/request-context';
 
 @Controller('search')
 export class SearchController {
@@ -14,7 +15,7 @@ export class SearchController {
     @Query('q') query?: string,
   ) {
     return this.searchService.search(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query ?? '',
       req.user?.branchScope ?? [],
     );

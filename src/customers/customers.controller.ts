@@ -12,6 +12,7 @@ import {
 import { CustomersService } from './customers.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('customers')
 export class CustomersController {
@@ -36,7 +37,7 @@ export class CustomersController {
       PermissionsList.CUSTOMERS_VIEW_SENSITIVE,
     );
     return this.customersService.list(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       canViewSensitive,
       query,
     );
@@ -54,7 +55,7 @@ export class CustomersController {
       PermissionsList.CUSTOMERS_VIEW_SENSITIVE,
     );
     return this.customersService.getById(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
       canViewSensitive,
     );
@@ -79,8 +80,8 @@ export class CustomersController {
       throw new BadRequestException('name is required.');
     }
     return this.customersService.create(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -102,8 +103,8 @@ export class CustomersController {
     },
   ) {
     return this.customersService.update(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
       body,
     );
@@ -116,8 +117,8 @@ export class CustomersController {
     @Req() req: { user?: { businessId: string; sub?: string } },
   ) {
     return this.customersService.archive(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
     );
   }
@@ -129,15 +130,23 @@ export class CustomersController {
     @Req() req: { user?: { businessId: string; sub?: string } },
   ) {
     return this.customersService.anonymize(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
     );
   }
 
   @Get('export/csv')
   @Permissions(PermissionsList.CUSTOMERS_EXPORT)
-  exportCsv(@Req() req: { user?: { businessId: string } }) {
-    return this.customersService.exportCsv(req.user?.businessId || '');
+  exportCsv(
+    @Req() req: { user?: { businessId: string; permissions?: string[] } },
+  ) {
+    const canViewSensitive = (req.user?.permissions ?? []).includes(
+      PermissionsList.CUSTOMERS_VIEW_SENSITIVE,
+    );
+    return this.customersService.exportCsv(
+      requireBusinessId(req),
+      canViewSensitive,
+    );
   }
 }

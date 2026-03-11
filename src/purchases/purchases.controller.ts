@@ -13,6 +13,7 @@ import {
 import { PurchasesService } from './purchases.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller()
 export class PurchasesController {
@@ -49,8 +50,8 @@ export class PurchasesController {
       };
     }
     return this.purchasesService.createPurchase(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       body,
     );
@@ -89,8 +90,8 @@ export class PurchasesController {
       throw new BadRequestException('lines are required.');
     }
     return this.purchasesService.createPurchaseOrder(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -113,8 +114,8 @@ export class PurchasesController {
     },
   ) {
     return this.purchasesService.updatePurchaseOrder(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       id,
       body,
@@ -129,9 +130,9 @@ export class PurchasesController {
     req: { user?: { businessId: string; sub?: string; roleIds?: string[] } },
   ) {
     return this.purchasesService.approvePurchaseOrder(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || 'system',
+      requireUserId(req),
       req.user?.roleIds || [],
     );
   }
@@ -175,8 +176,8 @@ export class PurchasesController {
       throw new BadRequestException('lines are required.');
     }
     return this.purchasesService.receive(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -199,7 +200,7 @@ export class PurchasesController {
     },
   ) {
     return this.purchasesService.listPurchases(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -223,7 +224,7 @@ export class PurchasesController {
     },
   ) {
     return this.purchasesService.listPurchaseOrders(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -249,7 +250,7 @@ export class PurchasesController {
     },
   ) {
     return this.purchasesService.listReceivings(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -272,7 +273,7 @@ export class PurchasesController {
     },
   ) {
     return this.purchasesService.listSupplierReturns(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -292,8 +293,8 @@ export class PurchasesController {
     },
   ) {
     return this.purchasesService.recordPayment(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       {
         purchaseId: id,
         ...body,
@@ -323,8 +324,8 @@ export class PurchasesController {
     },
   ) {
     return this.purchasesService.createSupplierReturn(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       body,
     );

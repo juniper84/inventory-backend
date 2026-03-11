@@ -1,8 +1,10 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Inject,
   forwardRef,
+  NotFoundException,
   Optional,
 } from '@nestjs/common';
 import {
@@ -73,6 +75,26 @@ export class ApprovalsService {
     const payloadBranchId =
       payload && typeof payload.branchId === 'string' ? payload.branchId : null;
     return payloadBranchId ?? null;
+  }
+
+  /**
+   * Returns a numeric approval tier for a user within a business.
+   * Reads the approvalTier column directly from each Role record.
+   * A user may hold multiple roles; the highest tier wins.
+   */
+  private async getUserApprovalTier(
+    userId: string,
+    businessId: string,
+  ): Promise<number> {
+    const userRoles = await this.prisma.userRole.findMany({
+      where: { userId, role: { businessId } },
+      select: { role: { select: { approvalTier: true } } },
+    });
+    let maxTier = 0;
+    for (const ur of userRoles) {
+      maxTier = Math.max(maxTier, ur.role.approvalTier);
+    }
+    return maxTier;
   }
 
   private getPendingAction(metadata: Prisma.JsonValue | null) {
@@ -353,6 +375,7 @@ export class ApprovalsService {
 
   async createPolicy(
     businessId: string,
+    userId: string,
     data: {
       actionType: string;
       thresholdType?: 'NONE' | 'PERCENT' | 'AMOUNT';
@@ -361,6 +384,25 @@ export class ApprovalsService {
       allowSelfApprove?: boolean;
     },
   ) {
+    const existingActive = await this.prisma.approvalPolicy.findFirst({
+      where: { businessId, actionType: data.actionType, status: RecordStatus.ACTIVE },
+    });
+    if (existingActive) {
+      throw new ConflictException(
+        'An active approval policy already exists for this action type.',
+      );
+    }
+    if (data.requiredRoleIds?.length) {
+      const validRoles = await this.prisma.role.findMany({
+        where: { id: { in: data.requiredRoleIds }, businessId },
+        select: { id: true },
+      });
+      if (validRoles.length !== data.requiredRoleIds.length) {
+        throw new BadRequestException(
+          'One or more selected roles are invalid for this business.',
+        );
+      }
+    }
     const policy = await this.prisma.approvalPolicy.create({
       data: {
         businessId,
@@ -377,7 +419,7 @@ export class ApprovalsService {
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'APPROVAL_POLICY_CREATE',
       resourceType: 'ApprovalPolicy',
       resourceId: policy.id,
@@ -389,6 +431,15 @@ export class ApprovalsService {
   }
 
   async requestApproval(request: ApprovalRequest) {
+    // System Owner is the final authority — their actions never need approval.
+    const requesterTier = await this.getUserApprovalTier(
+      request.requestedByUserId,
+      request.businessId,
+    );
+    if (requesterTier >= 3) {
+      return { required: false, approval: null };
+    }
+
     const policy = await this.prisma.approvalPolicy.findFirst({
       where: {
         businessId: request.businessId,
@@ -458,9 +509,10 @@ export class ApprovalsService {
             ? new Prisma.Decimal(request.percent)
             : null,
         reason: request.reason ?? null,
-        metadata: request.metadata
-          ? (request.metadata as Prisma.InputJsonValue)
-          : undefined,
+        metadata: ({
+          ...(request.metadata ?? {}),
+          requesterTier,
+        } as Prisma.InputJsonValue),
         targetType: request.targetType ?? null,
         targetId: request.targetId ?? null,
       },
@@ -666,6 +718,7 @@ export class ApprovalsService {
 
   async updatePolicy(
     businessId: string,
+    userId: string,
     policyId: string,
     data: {
       thresholdType?: 'NONE' | 'PERCENT' | 'AMOUNT';
@@ -680,13 +733,24 @@ export class ApprovalsService {
     if (!existing) {
       return null;
     }
+    if (data.requiredRoleIds?.length) {
+      const validRoles = await this.prisma.role.findMany({
+        where: { id: { in: data.requiredRoleIds }, businessId },
+        select: { id: true },
+      });
+      if (validRoles.length !== data.requiredRoleIds.length) {
+        throw new BadRequestException(
+          'One or more selected roles are invalid for this business.',
+        );
+      }
+    }
 
     const existingRoleIds = Array.isArray(existing.requiredRoleIds)
       ? existing.requiredRoleIds
       : [];
 
-    const policy = await this.prisma.approvalPolicy.update({
-      where: { id: policyId },
+    await this.prisma.approvalPolicy.updateMany({
+      where: { id: policyId, businessId },
       data: {
         thresholdType: data.thresholdType
           ? (data.thresholdType as ApprovalThresholdType)
@@ -701,10 +765,13 @@ export class ApprovalsService {
         allowSelfApprove: data.allowSelfApprove ?? existing.allowSelfApprove,
       },
     });
+    const policy = (await this.prisma.approvalPolicy.findFirst({
+      where: { id: policyId, businessId },
+    }))!;
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'APPROVAL_POLICY_UPDATE',
       resourceType: 'ApprovalPolicy',
       resourceId: policy.id,
@@ -717,7 +784,7 @@ export class ApprovalsService {
     return policy;
   }
 
-  async archivePolicy(businessId: string, policyId: string) {
+  async archivePolicy(businessId: string, userId: string, policyId: string) {
     const existing = await this.prisma.approvalPolicy.findFirst({
       where: { id: policyId, businessId },
     });
@@ -725,14 +792,17 @@ export class ApprovalsService {
       return null;
     }
 
-    const policy = await this.prisma.approvalPolicy.update({
-      where: { id: policyId },
+    await this.prisma.approvalPolicy.updateMany({
+      where: { id: policyId, businessId },
       data: { status: RecordStatus.ARCHIVED },
     });
+    const policy = (await this.prisma.approvalPolicy.findFirst({
+      where: { id: policyId, businessId },
+    }))!;
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'APPROVAL_POLICY_ARCHIVE',
       resourceType: 'ApprovalPolicy',
       resourceId: policy.id,
@@ -742,8 +812,9 @@ export class ApprovalsService {
     return policy;
   }
 
-  listApprovals(
+  async listApprovals(
     businessId: string,
+    callerUserId: string,
     query: PaginationQuery & {
       search?: string;
       status?: string;
@@ -753,6 +824,16 @@ export class ApprovalsService {
       includeTotal?: string;
     } = {},
   ) {
+    const callerTier = await this.getUserApprovalTier(callerUserId, businessId);
+    // Find users in this business whose highest tier exceeds the caller's tier.
+    // Those users' approval requests should not be visible to the caller.
+    const higherTierUserIds = callerTier < 3
+      ? await this.prisma.userRole.findMany({
+          where: { role: { businessId, approvalTier: { gt: callerTier } } },
+          select: { userId: true },
+          distinct: ['userId'],
+        }).then((rows) => rows.map((r) => r.userId))
+      : [];
     const pagination = parsePagination(query);
     const search = query.search?.trim();
     const from = query.from ? new Date(query.from) : undefined;
@@ -763,6 +844,9 @@ export class ApprovalsService {
         : (query.status as ApprovalStatus);
     const where = {
       businessId,
+      ...(higherTierUserIds.length
+        ? { requestedByUserId: { notIn: higherTierUserIds } }
+        : {}),
       ...(status ? { status } : {}),
       ...(query.actionType ? { actionType: query.actionType } : {}),
       ...(search
@@ -847,10 +931,24 @@ export class ApprovalsService {
       where: { id: approvalId, businessId },
     });
     if (!approval) {
-      return null;
+      throw new NotFoundException('Approval not found.');
     }
-    if (approval.status === ApprovalStatus.APPROVED) {
+    if (approval.status !== ApprovalStatus.PENDING) {
       return approval;
+    }
+
+    if (approval.requestedByUserId && approval.requestedByUserId === userId) {
+      throw new BadRequestException('You cannot approve your own request.');
+    }
+
+    const approverTier = await this.getUserApprovalTier(userId, businessId);
+    const meta = this.getMetadataRecord(approval.metadata);
+    const requesterTier =
+      typeof meta?.requesterTier === 'number' ? meta.requesterTier : 0;
+    if (approverTier <= requesterTier) {
+      throw new BadRequestException(
+        'You can only approve requests from users with a lower role than yours.',
+      );
     }
 
     const pendingAction = this.getPendingAction(approval.metadata);
@@ -904,14 +1002,17 @@ export class ApprovalsService {
       }
     }
 
-    const updated = await this.prisma.approval.update({
-      where: { id: approvalId },
+    await this.prisma.approval.updateMany({
+      where: { id: approvalId, businessId },
       data: {
         status: ApprovalStatus.APPROVED,
         decidedAt: new Date(),
         approvedByUserId: userId,
       },
     });
+    const updated = (await this.prisma.approval.findFirst({
+      where: { id: approvalId, businessId },
+    }))!;
 
     const approvalMetadata = this.getMetadataRecord(approval.metadata);
     const approvalBranchId = this.getBranchIdFromMetadata(approvalMetadata);
@@ -955,11 +1056,30 @@ export class ApprovalsService {
       where: { id: approvalId, businessId },
     });
     if (!approval) {
-      return null;
+      throw new NotFoundException('Approval not found.');
+    }
+    if (approval.status !== ApprovalStatus.PENDING) {
+      return approval;
     }
 
-    const updated = await this.prisma.approval.update({
-      where: { id: approvalId },
+    if (approval.requestedByUserId && approval.requestedByUserId === userId) {
+      throw new BadRequestException('You cannot reject your own request.');
+    }
+
+    const rejecterTier = await this.getUserApprovalTier(userId, businessId);
+    const rejectMeta = this.getMetadataRecord(approval.metadata);
+    const requesterTierForReject =
+      typeof rejectMeta?.requesterTier === 'number'
+        ? rejectMeta.requesterTier
+        : 0;
+    if (rejecterTier <= requesterTierForReject) {
+      throw new BadRequestException(
+        'You can only reject requests from users with a lower role than yours.',
+      );
+    }
+
+    await this.prisma.approval.updateMany({
+      where: { id: approvalId, businessId },
       data: {
         status: ApprovalStatus.REJECTED,
         decidedAt: new Date(),
@@ -967,6 +1087,9 @@ export class ApprovalsService {
         reason: reason ?? null,
       },
     });
+    const updated = (await this.prisma.approval.findFirst({
+      where: { id: approvalId, businessId },
+    }))!;
 
     const approvalMetadata = this.getMetadataRecord(approval.metadata);
     const approvalBranchId = this.getBranchIdFromMetadata(approvalMetadata);

@@ -57,6 +57,7 @@ export class BranchesService {
 
   async create(
     businessId: string,
+    userId: string,
     data: {
       name: string;
       address?: string;
@@ -64,19 +65,21 @@ export class BranchesService {
       priceListId?: string | null;
     },
   ) {
-    await this.subscriptionService.assertLimit(businessId, 'branches');
-    const result = await this.prisma.branch.create({
-      data: {
-        businessId,
-        name: data.name,
-        address: data.address,
-        phone: data.phone,
-        priceListId: data.priceListId ?? null,
-      },
+    const result = await this.prisma.$transaction(async (tx) => {
+      await this.subscriptionService.assertLimit(businessId, 'branches', 1, tx);
+      return tx.branch.create({
+        data: {
+          businessId,
+          name: data.name,
+          address: data.address,
+          phone: data.phone,
+          priceListId: data.priceListId ?? null,
+        },
+      });
     });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'BRANCH_CREATE',
       resourceType: 'Branch',
       resourceId: result.id,
@@ -89,6 +92,7 @@ export class BranchesService {
   async update(
     businessId: string,
     branchId: string,
+    userId: string,
     data: {
       name?: string;
       address?: string;
@@ -102,8 +106,8 @@ export class BranchesService {
     if (!before) {
       return null;
     }
-    const result = await this.prisma.branch.update({
-      where: { id: branchId },
+    await this.prisma.branch.updateMany({
+      where: { id: branchId, businessId },
       data: {
         name: data.name ?? undefined,
         address: data.address ?? undefined,
@@ -112,9 +116,12 @@ export class BranchesService {
           data.priceListId === undefined ? undefined : data.priceListId,
       },
     });
+    const result = (await this.prisma.branch.findFirst({
+      where: { id: branchId, businessId },
+    }))!;
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'BRANCH_UPDATE',
       resourceType: 'Branch',
       resourceId: branchId,

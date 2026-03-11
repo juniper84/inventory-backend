@@ -2,6 +2,7 @@ import { Controller, Get, Query, Req } from '@nestjs/common';
 import { ReportsService } from './reports.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('reports')
 export class ReportsController {
@@ -17,8 +18,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.stockReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { branchId },
       req.user?.branchScope ?? [],
     );
@@ -36,8 +37,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.salesReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       {
         startDate,
         endDate,
@@ -59,8 +60,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.vatReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       {
         startDate,
         endDate,
@@ -82,8 +83,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.vatSummaryReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       {
         startDate,
         endDate,
@@ -105,8 +106,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.pnlReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       {
         startDate,
         endDate,
@@ -127,8 +128,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.lowStockReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       {
         threshold,
         branchId,
@@ -148,8 +149,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.expiryReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { days, branchId },
       req.user?.branchScope ?? [],
     );
@@ -167,9 +168,103 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.topLossesReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { days, limit, branchId },
+      req.user?.branchScope ?? [],
+    );
+  }
+
+  @Get('top-products')
+  @Permissions(PermissionsList.REPORTS_READ)
+  topProducts(
+    @Req()
+    req: {
+      user?: { businessId: string; sub?: string; branchScope?: string[] };
+    },
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('branchId') branchId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.reportsService.topProductsReport(
+      requireBusinessId(req),
+      requireUserId(req),
+      { startDate, endDate, branchId, limit },
+      req.user?.branchScope ?? [],
+    );
+  }
+
+  @Get('sales-by-branch')
+  @Permissions(PermissionsList.REPORTS_READ)
+  salesByBranch(
+    @Req()
+    req: {
+      user?: { businessId: string; sub?: string; branchScope?: string[] };
+    },
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.reportsService.salesByBranchReport(
+      requireBusinessId(req),
+      requireUserId(req),
+      { startDate, endDate, branchId },
+      req.user?.branchScope ?? [],
+    );
+  }
+
+  @Get('expenses/breakdown')
+  @Permissions(PermissionsList.REPORTS_READ)
+  expenseBreakdown(
+    @Req()
+    req: {
+      user?: { businessId: string; sub?: string; branchScope?: string[] };
+    },
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('branchId') branchId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.reportsService.expenseBreakdownReport(
+      requireBusinessId(req),
+      requireUserId(req),
+      { startDate, endDate, branchId, limit },
+      req.user?.branchScope ?? [],
+    );
+  }
+
+  @Get('recent-activity')
+  @Permissions(PermissionsList.REPORTS_READ)
+  recentActivity(
+    @Req()
+    req: {
+      user?: { businessId: string; sub?: string; branchScope?: string[] };
+    },
+    @Query('branchId') branchId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.reportsService.recentActivityReport(
+      requireBusinessId(req),
+      requireUserId(req),
+      { branchId, limit },
+      req.user?.branchScope ?? [],
+    );
+  }
+
+  @Get('stock-value')
+  @Permissions(PermissionsList.REPORTS_READ)
+  stockValue(
+    @Req()
+    req: {
+      user?: { businessId: string; sub?: string; branchScope?: string[] };
+    },
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.reportsService.stockValueReport(
+      requireBusinessId(req),
+      requireUserId(req),
+      { branchId },
       req.user?.branchScope ?? [],
     );
   }
@@ -186,8 +281,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.stockCountVarianceReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { from, to, branchId },
       req.user?.branchScope ?? [],
     );
@@ -205,8 +300,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.staffPerformance(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { startDate, endDate, branchId },
       req.user?.branchScope ?? [],
     );
@@ -224,8 +319,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.customerSalesReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       {
         startDate,
         endDate,
@@ -247,8 +342,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.customerRefundsReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       {
         startDate,
         endDate,
@@ -268,8 +363,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.customerOutstandingReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { branchId },
       req.user?.branchScope ?? [],
     );
@@ -285,8 +380,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.topCustomersReport(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { branchId },
       req.user?.branchScope ?? [],
     );
@@ -304,8 +399,8 @@ export class ReportsController {
     @Query('branchId') branchId?: string,
   ) {
     return this.reportsService.customerReportsCsv(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { startDate, endDate, branchId },
       req.user?.branchScope ?? [],
     );

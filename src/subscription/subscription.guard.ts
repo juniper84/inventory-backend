@@ -13,6 +13,12 @@ export const SUBSCRIPTION_BYPASS_KEY = 'subscriptionBypass';
 export const SubscriptionBypass = () =>
   SetMetadata(SUBSCRIPTION_BYPASS_KEY, true);
 
+// NOTE: TECH DEBT — This guard implements a complex lazy state machine that handles
+// TRIAL → GRACE → EXPIRED transitions inline on every request. This works but is
+// fragile: multiple concurrent requests can each trigger the same transition.
+// The updateMany+count pattern prevents duplicate writes but the logic is hard to follow.
+// Future: Extract to a dedicated background scheduler that drives subscription state
+// transitions on a cron basis, and simplify this guard to a pure status check.
 @Injectable()
 export class SubscriptionGuard implements CanActivate {
   constructor(
@@ -131,97 +137,111 @@ export class SubscriptionGuard implements CanActivate {
           const graceEndsAt = record.graceEndsAt
             ? record.graceEndsAt
             : new Date(now.getTime() + graceDurationMs);
-          const updated = await this.prisma.subscription.update({
-            where: { id: record.id },
+          const graceResult = await this.prisma.subscription.updateMany({
+            where: {
+              id: record.id,
+              status: { not: SubscriptionStatus.GRACE },
+            },
             data: { status: SubscriptionStatus.GRACE, graceEndsAt },
-            select: { id: true, status: true, graceEndsAt: true, tier: true },
           });
-          await this.prisma.subscriptionHistory.create({
-            data: {
+          if (graceResult.count > 0) {
+            await this.prisma.subscriptionHistory.create({
+              data: {
+                businessId: record.businessId,
+                previousStatus: record.status,
+                newStatus: SubscriptionStatus.GRACE,
+                previousTier: record.tier,
+                newTier: record.tier,
+                changedByPlatformAdminId: null,
+                reason: 'Auto-grace',
+                metadata: {
+                  graceEndsAt: graceEndsAt.toISOString(),
+                },
+              },
+            });
+            await this.auditService.logEvent({
               businessId: record.businessId,
-              previousStatus: record.status,
-              newStatus: SubscriptionStatus.GRACE,
-              previousTier: record.tier,
-              newTier: record.tier,
-              changedByPlatformAdminId: null,
-              reason: 'Auto-grace',
+              action: 'SUBSCRIPTION_STATUS_SYNC',
+              resourceType: 'Subscription',
+              resourceId: record.id,
+              outcome: 'SUCCESS',
               metadata: {
+                status: SubscriptionStatus.GRACE,
                 graceEndsAt: graceEndsAt.toISOString(),
               },
-            },
-          });
-          await this.auditService.logEvent({
-            businessId: record.businessId,
-            action: 'SUBSCRIPTION_STATUS_SYNC',
-            resourceType: 'Subscription',
-            resourceId: record.id,
-            outcome: 'SUCCESS',
-            metadata: {
-              status: updated.status,
-              graceEndsAt: graceEndsAt.toISOString(),
-            },
-          });
-          await this.prisma.business.updateMany({
-            where: {
-              id: record.businessId,
-              status: { not: 'GRACE' },
-            },
-            data: { status: 'GRACE' },
-          });
+            });
+            await this.prisma.business.updateMany({
+              where: {
+                id: record.businessId,
+                status: { not: 'GRACE' },
+              },
+              data: { status: 'GRACE' },
+            });
+          }
         }
 
         if (effectiveStatus === SubscriptionStatus.EXPIRED) {
           const expiresAt = record.expiresAt ?? now;
-          const updated = await this.prisma.subscription.update({
-            where: { id: record.id },
-            data: { status: SubscriptionStatus.EXPIRED, expiresAt },
-            select: { id: true, status: true, expiresAt: true, tier: true },
-          });
-          await this.prisma.businessSettings.updateMany({
-            where: { businessId: record.businessId, readOnlyEnabled: false },
-            data: {
-              readOnlyEnabled: true,
-              readOnlyReason:
-                record.status === SubscriptionStatus.TRIAL
-                  ? 'Trial expired. Please subscribe to continue.'
-                  : 'Subscription expired. Please pay to continue.',
-              readOnlyEnabledAt: now,
-            },
-          });
-          await this.prisma.offlineDevice.updateMany({
-            where: { businessId: record.businessId, status: 'ACTIVE' },
-            data: { status: 'REVOKED', revokedAt: now },
-          });
-          await this.prisma.subscriptionHistory.create({
-            data: {
-              businessId: record.businessId,
-              previousStatus: record.status,
-              newStatus: SubscriptionStatus.EXPIRED,
-              previousTier: record.tier,
-              newTier: record.tier,
-              changedByPlatformAdminId: null,
-              reason: 'Auto-expired',
-              metadata: { expiresAt: expiresAt.toISOString() },
-            },
-          });
-          await this.auditService.logEvent({
-            businessId: record.businessId,
-            action: 'SUBSCRIPTION_STATUS_SYNC',
-            resourceType: 'Subscription',
-            resourceId: record.id,
-            outcome: 'SUCCESS',
-            metadata: {
-              status: updated.status,
-              expiresAt: expiresAt.toISOString(),
-            },
-          });
-          await this.prisma.business.updateMany({
+          const expiredResult = await this.prisma.subscription.updateMany({
             where: {
-              id: record.businessId,
-              status: { not: 'EXPIRED' },
+              id: record.id,
+              status: { not: SubscriptionStatus.EXPIRED },
             },
-            data: { status: 'EXPIRED' },
+            data: { status: SubscriptionStatus.EXPIRED, expiresAt },
           });
+          const updated = expiredResult.count > 0
+            ? await this.prisma.subscription.findUnique({
+                where: { id: record.id },
+                select: { id: true, status: true, expiresAt: true, tier: true },
+              })
+            : null;
+          if (updated) {
+            await this.prisma.businessSettings.updateMany({
+              where: { businessId: record.businessId, readOnlyEnabled: false },
+              data: {
+                readOnlyEnabled: true,
+                readOnlyReason:
+                  record.status === SubscriptionStatus.TRIAL
+                    ? 'Trial expired. Please subscribe to continue.'
+                    : 'Subscription expired. Please pay to continue.',
+                readOnlyEnabledAt: now,
+              },
+            });
+            await this.prisma.offlineDevice.updateMany({
+              where: { businessId: record.businessId, status: 'ACTIVE' },
+              data: { status: 'REVOKED', revokedAt: now },
+            });
+            await this.prisma.subscriptionHistory.create({
+              data: {
+                businessId: record.businessId,
+                previousStatus: record.status,
+                newStatus: SubscriptionStatus.EXPIRED,
+                previousTier: record.tier,
+                newTier: record.tier,
+                changedByPlatformAdminId: null,
+                reason: 'Auto-expired',
+                metadata: { expiresAt: expiresAt.toISOString() },
+              },
+            });
+            await this.auditService.logEvent({
+              businessId: record.businessId,
+              action: 'SUBSCRIPTION_STATUS_SYNC',
+              resourceType: 'Subscription',
+              resourceId: record.id,
+              outcome: 'SUCCESS',
+              metadata: {
+                status: updated.status,
+                expiresAt: expiresAt.toISOString(),
+              },
+            });
+            await this.prisma.business.updateMany({
+              where: {
+                id: record.businessId,
+                status: { not: 'EXPIRED' },
+              },
+              data: { status: 'EXPIRED' },
+            });
+          }
         }
       }
     }

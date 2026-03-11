@@ -12,6 +12,7 @@ import {
 import { CatalogService } from './catalog.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller()
 export class CatalogController {
@@ -30,7 +31,7 @@ export class CatalogController {
     },
   ) {
     return this.catalogService.listCategories(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
     );
   }
@@ -38,25 +39,26 @@ export class CatalogController {
   @Post('categories')
   @Permissions(PermissionsList.CATALOG_WRITE)
   createCategory(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { name: string; parentId?: string },
   ) {
     if (!body.name?.trim()) {
       throw new BadRequestException('name is required.');
     }
-    return this.catalogService.createCategory(req.user?.businessId || '', body);
+    return this.catalogService.createCategory(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Put('categories/:id')
   @Permissions(PermissionsList.CATALOG_WRITE)
   updateCategory(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { name?: string; parentId?: string },
   ) {
     return this.catalogService.updateCategory(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
+      requireUserId(req),
       body,
     );
   }
@@ -77,26 +79,26 @@ export class CatalogController {
       includeTotal?: string;
     },
   ) {
-    return this.catalogService.listProducts(req.user?.businessId || '', query);
+    return this.catalogService.listProducts(requireBusinessId(req), query);
   }
 
   @Post('products')
   @Permissions(PermissionsList.CATALOG_WRITE)
   createProduct(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { name: string; description?: string; categoryId: string },
   ) {
     if (!body.categoryId) {
       throw new BadRequestException('categoryId is required.');
     }
-    return this.catalogService.createProduct(req.user?.businessId || '', body);
+    return this.catalogService.createProduct(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Put('products/:id')
   @Permissions(PermissionsList.CATALOG_WRITE)
   updateProduct(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       name?: string;
@@ -106,8 +108,9 @@ export class CatalogController {
     },
   ) {
     return this.catalogService.updateProduct(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
+      requireUserId(req),
       body,
     );
   }
@@ -124,17 +127,18 @@ export class CatalogController {
       status?: string;
       productId?: string;
       branchId?: string;
+      hasStockBranchId?: string;
       availability?: string;
       includeTotal?: string;
     },
   ) {
-    return this.catalogService.listVariants(req.user?.businessId || '', query);
+    return this.catalogService.listVariants(requireBusinessId(req), query);
   }
 
   @Post('variants')
   @Permissions(PermissionsList.CATALOG_WRITE)
   createVariant(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       productId: string;
@@ -155,14 +159,14 @@ export class CatalogController {
     if (!body.baseUnitId || !body.sellUnitId) {
       throw new BadRequestException('baseUnitId and sellUnitId are required.');
     }
-    return this.catalogService.createVariant(req.user?.businessId || '', body);
+    return this.catalogService.createVariant(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Put('variants/:id')
   @Permissions(PermissionsList.CATALOG_WRITE)
   updateVariant(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       name?: string;
@@ -180,8 +184,9 @@ export class CatalogController {
     },
   ) {
     return this.catalogService.updateVariant(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
+      requireUserId(req),
       body,
     );
   }
@@ -192,26 +197,27 @@ export class CatalogController {
     @Req() req: { user?: { businessId: string } },
     @Query('code') code: string,
   ) {
-    return this.catalogService.lookupBarcode(req.user?.businessId || '', code);
+    return this.catalogService.lookupBarcode(requireBusinessId(req), code);
   }
 
   @Post('barcodes')
   @Permissions(PermissionsList.CATALOG_WRITE)
   createBarcode(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { variantId: string; code: string },
   ) {
-    return this.catalogService.createBarcode(req.user?.businessId || '', body);
+    return this.catalogService.createBarcode(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Post('barcodes/generate')
   @Permissions(PermissionsList.CATALOG_WRITE)
   generateBarcode(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { variantId: string },
   ) {
     return this.catalogService.generateBarcode(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -225,8 +231,8 @@ export class CatalogController {
     @Body() body: { newVariantId: string; reason?: string },
   ) {
     return this.catalogService.reassignBarcode(
-      req.user?.businessId || '',
-      req.user?.sub || '',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       { barcodeId: id, newVariantId: body.newVariantId, reason: body.reason },
     );
@@ -241,8 +247,8 @@ export class CatalogController {
     @Body() body: { sku: string; reason?: string },
   ) {
     return this.catalogService.reassignSku(
-      req.user?.businessId || '',
-      req.user?.sub || '',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       { variantId: id, sku: body.sku, reason: body.reason },
     );
@@ -252,11 +258,12 @@ export class CatalogController {
   @Permissions(PermissionsList.CATALOG_WRITE)
   updateAvailability(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { branchId: string; isActive: boolean },
   ) {
     return this.catalogService.updateVariantAvailability(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       { variantId: id, branchId: body.branchId, isActive: body.isActive },
     );
   }
@@ -277,7 +284,7 @@ export class CatalogController {
       return null;
     }
     return this.catalogService.createPresignedProductImageUpload(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       { productId: id, filename: body.filename, contentType: body.contentType },
     );
   }
@@ -305,8 +312,8 @@ export class CatalogController {
       return null;
     }
     return this.catalogService.registerProductImage(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { productId: id, ...body },
     );
   }
@@ -316,12 +323,13 @@ export class CatalogController {
   setPrimaryImage(
     @Param('id') id: string,
     @Param('imageId') imageId: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
   ) {
     return this.catalogService.setPrimaryProductImage(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
       imageId,
+      requireUserId(req),
     );
   }
 
@@ -330,12 +338,13 @@ export class CatalogController {
   removeProductImage(
     @Param('id') id: string,
     @Param('imageId') imageId: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
   ) {
     return this.catalogService.removeProductImage(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
       imageId,
+      requireUserId(req),
     );
   }
 
@@ -346,7 +355,7 @@ export class CatalogController {
     @Body() body: { variantIds: string[] },
   ) {
     return this.catalogService.buildBarcodeLabels(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       body,
     );
   }
@@ -367,7 +376,7 @@ export class CatalogController {
       return null;
     }
     return this.catalogService.createPresignedVariantImageUpload(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       { variantId: id, filename: body.filename, contentType: body.contentType },
     );
   }
@@ -388,8 +397,8 @@ export class CatalogController {
       return null;
     }
     return this.catalogService.setVariantImage(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       { variantId: id, imageUrl: body.imageUrl },
     );
   }

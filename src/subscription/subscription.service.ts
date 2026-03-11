@@ -2,12 +2,24 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  Prisma,
   SubscriptionRequestStatus,
   SubscriptionRequestType,
   SubscriptionStatus,
   SubscriptionTier,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+
+// FNV-1a 32-bit hash for generating pg_advisory_xact_lock keys.
+// Returns a signed int32 safe to pass as a PostgreSQL int4 parameter.
+function fnv1a32(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h | 0;
+}
 
 export type SubscriptionSnapshot = {
   status: SubscriptionStatus;
@@ -91,7 +103,7 @@ export class SubscriptionService {
     };
   }
 
-  async createTrialSubscription(businessId: string, tier: SubscriptionTier) {
+  async createTrialSubscription(businessId: string, tier: SubscriptionTier, actorId?: string) {
     const existing = await this.prisma.subscription.findUnique({
       where: { businessId },
     });
@@ -126,7 +138,7 @@ export class SubscriptionService {
     });
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId: actorId ?? 'background',
       action: 'SUBSCRIPTION_CREATE',
       resourceType: 'Subscription',
       resourceId: created.id,
@@ -190,6 +202,7 @@ export class SubscriptionService {
     businessId: string,
     key: keyof SubscriptionSnapshot['limits'],
     amount: number = 1,
+    tx?: Prisma.TransactionClient,
   ) {
     const subscription = await this.getSubscription(businessId);
     if (!subscription) {
@@ -201,34 +214,52 @@ export class SubscriptionService {
       return;
     }
 
+    // When running inside a transaction, acquire a per-(businessId, key)
+    // advisory lock so that concurrent requests cannot both pass the count
+    // check and then both write beyond the limit (TOCTOU prevention).
+    if (tx) {
+      await tx.$executeRawUnsafe(
+        'SELECT pg_advisory_xact_lock($1::int4, $2::int4)',
+        fnv1a32(businessId),
+        fnv1a32(String(key)),
+      );
+    }
+
+    const client = tx ?? this.prisma;
+
     let count = 0;
     switch (key) {
       case 'users':
-        count = await this.prisma.businessUser.count({ where: { businessId } });
+        count = await client.businessUser.count({ where: { businessId } });
         break;
       case 'branches':
-        count = await this.prisma.branch.count({ where: { businessId } });
+        count = await client.branch.count({ where: { businessId } });
         break;
       case 'products':
-        count = await this.prisma.product.count({ where: { businessId } });
+        count = await client.product.count({ where: { businessId } });
         break;
       case 'offlineDevices':
-        count = await this.prisma.offlineDevice.count({
+        count = await client.offlineDevice.count({
           where: { businessId },
         });
         break;
       case 'monthlyTransactions': {
+        // FIXME: This counts PurchaseOrder creation AND the resulting Purchase receipt
+        // as separate transactions, effectively double-counting a single purchasing workflow.
+        // A PurchaseOrder that gets received generates a Purchase, so one business action
+        // consumes two transaction slots. This should be reviewed and a consistent
+        // definition of "transaction" established (e.g. only count Sales + Purchases).
         const start = new Date();
         start.setDate(1);
         start.setHours(0, 0, 0, 0);
         const [sales, purchases, orders] = await Promise.all([
-          this.prisma.sale.count({
+          client.sale.count({
             where: { businessId, createdAt: { gte: start } },
           }),
-          this.prisma.purchase.count({
+          client.purchase.count({
             where: { businessId, createdAt: { gte: start } },
           }),
-          this.prisma.purchaseOrder.count({
+          client.purchaseOrder.count({
             where: { businessId, createdAt: { gte: start } },
           }),
         ]);
@@ -236,7 +267,7 @@ export class SubscriptionService {
         break;
       }
       case 'storageGb': {
-        const aggregate = await this.prisma.attachment.aggregate({
+        const aggregate = await client.attachment.aggregate({
           where: { businessId, status: 'ACTIVE' },
           _sum: { sizeMb: true },
         });
@@ -254,9 +285,7 @@ export class SubscriptionService {
     }
 
     if (count + Math.max(amount, 0) > limit) {
-      throw new BadRequestException(
-        `Subscription limit exceeded for ${String(key)}.`,
-      );
+      throw new BadRequestException('Subscription limit exceeded.');
     }
   }
 

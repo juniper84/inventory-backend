@@ -12,6 +12,7 @@ import { StockService } from './stock.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
 import { LossReason, StockMovementType } from '@prisma/client';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('stock')
 export class StockController {
@@ -34,7 +35,7 @@ export class StockController {
     },
   ) {
     return this.stockService.listStock(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -63,7 +64,7 @@ export class StockController {
       type: query.type as StockMovementType | undefined,
     };
     return this.stockService.listMovements(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       typedQuery,
       req.user?.branchScope ?? [],
     );
@@ -83,7 +84,7 @@ export class StockController {
     },
   ) {
     return this.stockService.listBatches(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -122,8 +123,8 @@ export class StockController {
       throw new BadRequestException('variantId is required.');
     }
     return this.stockService.createAdjustment(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       body,
     );
@@ -163,8 +164,8 @@ export class StockController {
       throw new BadRequestException('countedQuantity is required.');
     }
     return this.stockService.createStockCount(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       body,
     );
@@ -183,8 +184,8 @@ export class StockController {
     },
   ) {
     return this.stockService.createBatch(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -202,7 +203,7 @@ export class StockController {
     },
   ) {
     return this.stockService.listReorderPoints(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -233,8 +234,8 @@ export class StockController {
       );
     }
     return this.stockService.upsertReorderPoint(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -246,7 +247,7 @@ export class StockController {
     @Query() query: { branchId?: string },
   ) {
     return this.stockService.listReorderSuggestions(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );

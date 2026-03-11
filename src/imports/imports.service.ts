@@ -255,9 +255,12 @@ export class ImportsService {
           const before = await this.prisma.category.findFirst({
             where: { id: existingId, businessId },
           });
-          const updated = await this.prisma.category.update({
-            where: { id: existingId },
+          await this.prisma.category.updateMany({
+            where: { id: existingId, businessId },
             data: { status: status as RecordStatus, parentId },
+          });
+          const updated = await this.prisma.category.findFirst({
+            where: { id: existingId, businessId },
           });
           await this.logImportEvent({
             businessId,
@@ -390,110 +393,137 @@ export class ImportsService {
         vatMode,
       });
       if (apply) {
-        const category = await this.prisma.category.findFirst({
-          where: { businessId, name: categoryName },
-        });
-        if (!category && !allowCreateCategory) {
-          errors.push({ row: index + 2, message: 'Category does not exist.' });
-          continue;
-        }
-        let categoryRecord = category;
-        if (!categoryRecord) {
-          categoryRecord = await this.prisma.category.create({
-            data: {
+        // P2-G2-H1: Wrap product+variant+barcode creation in a single $transaction
+        // so that a partial failure does not leave orphaned product or variant records.
+        try {
+          const category = await this.prisma.category.findFirst({
+            where: { businessId, name: categoryName },
+          });
+          if (!category && !allowCreateCategory) {
+            errors.push({ row: index + 2, message: 'Category does not exist.' });
+            continue;
+          }
+
+          await this.prisma.$transaction(async (tx) => {
+            let categoryRecord = category;
+            if (!categoryRecord) {
+              categoryRecord = await tx.category.create({
+                data: {
+                  businessId,
+                  name: categoryName,
+                  status: RecordStatus.ACTIVE,
+                },
+              });
+              await this.logImportEvent({
+                businessId,
+                userId,
+                action: 'CATEGORY_CREATE',
+                resourceType: 'Category',
+                resourceId: categoryRecord.id,
+                metadata: {
+                  resourceName: categoryName,
+                  importType: 'products',
+                  row: index + 2,
+                },
+                after: categoryRecord as unknown as Record<string, unknown>,
+              });
+            }
+            const product = await tx.product.create({
+              data: {
+                businessId,
+                name,
+                description: row.description?.trim() || null,
+                status: status as RecordStatus,
+                categoryId: categoryRecord.id,
+              },
+            });
+            await this.logImportEvent({
               businessId,
-              name: categoryName,
-              status: RecordStatus.ACTIVE,
-            },
-          });
-          await this.logImportEvent({
-            businessId,
-            userId,
-            action: 'CATEGORY_CREATE',
-            resourceType: 'Category',
-            resourceId: categoryRecord.id,
-            metadata: {
-              resourceName: categoryName,
-              importType: 'products',
-              row: index + 2,
-            },
-            after: categoryRecord as unknown as Record<string, unknown>,
-          });
-        }
-        const product = await this.prisma.product.create({
-          data: {
-            businessId,
-            name,
-            description: row.description?.trim() || null,
-            status: status as RecordStatus,
-            categoryId: categoryRecord.id,
-          },
-        });
-        await this.logImportEvent({
-          businessId,
-          userId,
-          action: 'PRODUCT_CREATE',
-          resourceType: 'Product',
-          resourceId: product.id,
-          metadata: {
-            resourceName: name,
-            categoryId: categoryRecord.id,
-            importType: 'products',
-            row: index + 2,
-          },
-          after: product as unknown as Record<string, unknown>,
-        });
-        const variant = await this.prisma.variant.create({
-          data: {
-            businessId,
-            productId: product.id,
-            name,
-            sku: row.sku?.trim() || null,
-            defaultPrice: price !== null ? new Prisma.Decimal(price) : null,
-            defaultCost: cost !== null ? new Prisma.Decimal(cost) : null,
-            vatMode: (vatMode ?? 'INCLUSIVE') as VatMode,
-            status: status as RecordStatus,
-          },
-        });
-        await this.logImportEvent({
-          businessId,
-          userId,
-          action: 'VARIANT_CREATE',
-          resourceType: 'Variant',
-          resourceId: variant.id,
-          metadata: {
-            resourceName: name,
-            productId: product.id,
-            importType: 'products',
-            row: index + 2,
-          },
-          after: variant as unknown as Record<string, unknown>,
-        });
-        if (row.barcode?.trim()) {
-          const barcode = await this.prisma.barcode.create({
-            data: {
+              userId,
+              action: 'PRODUCT_CREATE',
+              resourceType: 'Product',
+              resourceId: product.id,
+              metadata: {
+                resourceName: name,
+                categoryId: categoryRecord.id,
+                importType: 'products',
+                row: index + 2,
+              },
+              after: product as unknown as Record<string, unknown>,
+            });
+            const variant = await tx.variant.create({
+              data: {
+                businessId,
+                productId: product.id,
+                name,
+                sku: row.sku?.trim() || null,
+                defaultPrice: price !== null ? new Prisma.Decimal(price) : null,
+                defaultCost: cost !== null ? new Prisma.Decimal(cost) : null,
+                vatMode: (vatMode ?? 'INCLUSIVE') as VatMode,
+                status: status as RecordStatus,
+              },
+            });
+            await this.logImportEvent({
               businessId,
-              variantId: variant.id,
-              code: row.barcode.trim(),
-              isActive: true,
-            },
+              userId,
+              action: 'VARIANT_CREATE',
+              resourceType: 'Variant',
+              resourceId: variant.id,
+              metadata: {
+                resourceName: name,
+                productId: product.id,
+                importType: 'products',
+                row: index + 2,
+              },
+              after: variant as unknown as Record<string, unknown>,
+            });
+            if (row.barcode?.trim()) {
+              // P2-G2-H2: Catch duplicate barcode (P2002) and surface as a row error
+              try {
+                const barcode = await tx.barcode.create({
+                  data: {
+                    businessId,
+                    variantId: variant.id,
+                    code: row.barcode.trim(),
+                    isActive: true,
+                  },
+                });
+                await this.logImportEvent({
+                  businessId,
+                  userId,
+                  action: 'BARCODE_CREATE',
+                  resourceType: 'Barcode',
+                  resourceId: barcode.id,
+                  metadata: {
+                    resourceName: barcode.code,
+                    variantId: variant.id,
+                    importType: 'products',
+                    row: index + 2,
+                  },
+                  after: barcode as unknown as Record<string, unknown>,
+                });
+              } catch (barcodeErr) {
+                if (
+                  barcodeErr instanceof Prisma.PrismaClientKnownRequestError &&
+                  barcodeErr.code === 'P2002'
+                ) {
+                  throw new BadRequestException({
+                    message: `Duplicate barcode: ${row.barcode.trim()}`,
+                    errorCode: 'IMPORT_DUPLICATE_BARCODE',
+                  });
+                }
+                throw barcodeErr;
+              }
+            }
           });
-          await this.logImportEvent({
-            businessId,
-            userId,
-            action: 'BARCODE_CREATE',
-            resourceType: 'Barcode',
-            resourceId: barcode.id,
-            metadata: {
-              resourceName: barcode.code,
-              variantId: variant.id,
-              importType: 'products',
-              row: index + 2,
-            },
-            after: barcode as unknown as Record<string, unknown>,
-          });
+          productNames.add(name.toLowerCase());
+        } catch (rowErr) {
+          if (rowErr instanceof BadRequestException) {
+            errors.push({ row: index + 2, message: rowErr.message });
+            continue;
+          }
+          throw rowErr;
         }
-        productNames.add(name.toLowerCase());
       }
     }
     return {
@@ -559,30 +589,81 @@ export class ImportsService {
         unitCost,
       });
       if (apply) {
-        let batchId: string | null = null;
-        if (batchCode) {
-          const existingBatch = await this.prisma.batch.findFirst({
-            where: {
-              businessId,
-              branchId,
-              variantId,
-              code: batchCode,
-            },
+        // Wrap batch + movement + snapshot in a single transaction so that a
+        // partial failure cannot leave a movement record without a corresponding
+        // snapshot update (ledger inconsistency).
+        const txResult = await this.prisma
+          .$transaction(async (tx) => {
+            let batch: Awaited<
+              ReturnType<typeof tx.batch.create>
+            > | null = null;
+            if (batchCode) {
+              const existingBatch = await tx.batch.findFirst({
+                where: { businessId, branchId, variantId, code: batchCode },
+              });
+              if (existingBatch) {
+                throw Object.assign(new Error('BATCH_EXISTS'), {
+                  row: index + 2,
+                });
+              }
+              batch = await tx.batch.create({
+                data: {
+                  businessId,
+                  branchId,
+                  variantId,
+                  code: batchCode,
+                  expiryDate: expiryDate ? new Date(expiryDate) : null,
+                },
+              });
+            }
+            const movement = await tx.stockMovement.create({
+              data: {
+                businessId,
+                branchId,
+                variantId,
+                createdById: userId,
+                batchId: batch?.id ?? null,
+                quantity: new Prisma.Decimal(quantity),
+                movementType: StockMovementType.OPENING_BALANCE,
+              },
+            });
+            const snapshot = await tx.stockSnapshot.upsert({
+              where: {
+                businessId_branchId_variantId: {
+                  businessId,
+                  branchId,
+                  variantId,
+                },
+              },
+              create: {
+                businessId,
+                branchId,
+                variantId,
+                quantity: new Prisma.Decimal(quantity),
+              },
+              update: {
+                quantity: { increment: new Prisma.Decimal(quantity) },
+              },
+            });
+            return { batch, movement, snapshot };
+          })
+          .catch((err: Error & { row?: number }) => {
+            if (err.message === 'BATCH_EXISTS') {
+              errors.push({
+                row: err.row ?? index + 2,
+                message: 'Batch already exists.',
+              });
+              return null;
+            }
+            throw err;
           });
-          if (existingBatch) {
-            errors.push({ row: index + 2, message: 'Batch already exists.' });
-            continue;
-          }
-          const batch = await this.prisma.batch.create({
-            data: {
-              businessId,
-              branchId,
-              variantId,
-              code: batchCode,
-              expiryDate: expiryDate ? new Date(expiryDate) : null,
-            },
-          });
-          batchId = batch.id;
+
+        if (!txResult) {
+          continue;
+        }
+
+        const { batch, movement, snapshot } = txResult;
+        if (batch) {
           await this.logImportEvent({
             businessId,
             userId,
@@ -599,17 +680,6 @@ export class ImportsService {
             after: batch as unknown as Record<string, unknown>,
           });
         }
-        const movement = await this.prisma.stockMovement.create({
-          data: {
-            businessId,
-            branchId,
-            variantId,
-            createdById: userId,
-            batchId,
-            quantity: new Prisma.Decimal(quantity),
-            movementType: StockMovementType.OPENING_BALANCE,
-          },
-        });
         await this.logImportEvent({
           businessId,
           userId,
@@ -619,26 +689,12 @@ export class ImportsService {
           metadata: {
             variantId,
             branchId,
-            batchId,
+            batchId: batch?.id ?? null,
             quantity,
             importType: 'opening_stock',
             row: index + 2,
           },
           after: movement as unknown as Record<string, unknown>,
-        });
-        const snapshot = await this.prisma.stockSnapshot.upsert({
-          where: {
-            businessId_branchId_variantId: { businessId, branchId, variantId },
-          },
-          create: {
-            businessId,
-            branchId,
-            variantId,
-            quantity: new Prisma.Decimal(quantity),
-          },
-          update: {
-            quantity: { increment: new Prisma.Decimal(quantity) },
-          },
         });
         await this.logImportEvent({
           businessId,
@@ -702,12 +758,15 @@ export class ImportsService {
       }
       preview.push({ variantId, price, vatMode: vatMode ?? variant.vatMode });
       if (apply) {
-        const updated = await this.prisma.variant.update({
-          where: { id: variantId },
+        await this.prisma.variant.updateMany({
+          where: { id: variantId, businessId },
           data: {
             defaultPrice: new Prisma.Decimal(price),
             vatMode: (vatMode ?? variant.vatMode) as VatMode,
           },
+        });
+        const updated = await this.prisma.variant.findFirst({
+          where: { id: variantId, businessId },
         });
         await this.logImportEvent({
           businessId,
@@ -792,9 +851,12 @@ export class ImportsService {
           if (!variant) {
             continue;
           }
-          const updated = await this.prisma.variant.update({
-            where: { id: variant.id },
+          await this.prisma.variant.updateMany({
+            where: { id: variant.id, businessId },
             data: { status: status as RecordStatus },
+          });
+          const updated = await this.prisma.variant.findFirst({
+            where: { id: variant.id, businessId },
           });
           await this.logImportEvent({
             businessId,
@@ -813,7 +875,7 @@ export class ImportsService {
           });
         } else {
           const updatedProduct = await this.prisma.product.update({
-            where: { id: product.id },
+            where: { id: product.id, businessId },
             data: { status: status as RecordStatus },
           });
           await this.prisma.variant.updateMany({
@@ -1102,7 +1164,6 @@ export class ImportsService {
               email,
               passwordHash: hashPassword(`Temp-${Date.now()}`),
               mustResetPassword: true,
-              status: status as UserStatus,
             },
           });
           await this.logImportEvent({
@@ -1121,7 +1182,7 @@ export class ImportsService {
         } else {
           const updated = await this.prisma.user.update({
             where: { id: user.id },
-            data: { name, status: status as UserStatus },
+            data: { name },
           });
           await this.logImportEvent({
             businessId,
@@ -1145,6 +1206,11 @@ export class ImportsService {
         if (!membership) {
           await this.prisma.businessUser.create({
             data: { businessId, userId: user.id, status: status as UserStatus },
+          });
+        } else {
+          await this.prisma.businessUser.update({
+            where: { id: membership.id },
+            data: { status: status as UserStatus },
           });
         }
         if (branchIds.length) {

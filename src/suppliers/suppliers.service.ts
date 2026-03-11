@@ -65,6 +65,7 @@ export class SuppliersService {
 
   async create(
     businessId: string,
+    userId: string,
     data: {
       name: string;
       phone?: string;
@@ -90,7 +91,7 @@ export class SuppliersService {
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'SUPPLIER_CREATE',
       resourceType: 'Supplier',
       resourceId: supplier.id,
@@ -104,6 +105,7 @@ export class SuppliersService {
   async update(
     businessId: string,
     supplierId: string,
+    userId: string,
     data: {
       name?: string;
       phone?: string;
@@ -121,18 +123,21 @@ export class SuppliersService {
       return null;
     }
 
-    const updated = await this.prisma.supplier.update({
-      where: { id: supplierId },
+    await this.prisma.supplier.updateMany({
+      where: { id: supplierId, businessId },
       data: {
         ...data,
         leadTimeDays:
           data.leadTimeDays === undefined ? undefined : data.leadTimeDays,
       },
     });
+    const updated = (await this.prisma.supplier.findFirst({
+      where: { id: supplierId, businessId },
+    }))!;
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'SUPPLIER_UPDATE',
       resourceType: 'Supplier',
       resourceId: updated.id,

@@ -55,15 +55,12 @@ export class SubscriptionReminderService
       where: {
         status: SubscriptionStatus.GRACE,
         graceEndsAt: { not: null, lte: windowEnd },
-        OR: [
-          { graceReminderSentAt: null },
-          { graceReminderSentAt: { lt: now } },
-        ],
+        graceReminderSentAt: null,
       },
       include: { business: { select: { name: true } } },
     });
 
-    await Promise.all(
+    await Promise.allSettled(
       candidates.map(async (subscription) => {
         const notify = await this.notificationsService.isEventEnabled(
           subscription.businessId,
@@ -82,6 +79,19 @@ export class SubscriptionReminderService
             )
           : null;
 
+        const reminderSentAt = new Date();
+        const updated = await this.prisma.subscription.update({
+          where: { id: subscription.id },
+          data: { graceReminderSentAt: reminderSentAt },
+          select: {
+            id: true,
+            status: true,
+            graceEndsAt: true,
+            graceReminderSentAt: true,
+            businessId: true,
+          },
+        });
+
         await this.notificationsService.notifyEvent({
           businessId: subscription.businessId,
           eventKey: 'graceWarnings',
@@ -94,19 +104,6 @@ export class SubscriptionReminderService
           metadata: {
             graceEndsAt: graceEndsAt?.toISOString() ?? null,
             businessName: subscription.business?.name ?? null,
-          },
-        });
-
-        const reminderSentAt = new Date();
-        const updated = await this.prisma.subscription.update({
-          where: { id: subscription.id },
-          data: { graceReminderSentAt: reminderSentAt },
-          select: {
-            id: true,
-            status: true,
-            graceEndsAt: true,
-            graceReminderSentAt: true,
-            businessId: true,
           },
         });
 
@@ -146,59 +143,62 @@ export class SubscriptionReminderService
       include: { business: { select: { name: true } } },
     });
 
-    await Promise.all(
+    await Promise.allSettled(
       candidates.map(async (subscription) => {
-        const updated = await this.prisma.subscription.update({
-          where: { id: subscription.id },
-          data: { status: SubscriptionStatus.EXPIRED },
-          select: {
-            id: true,
-            status: true,
-            expiresAt: true,
-            businessId: true,
-            tier: true,
-          },
-        });
+        const updated = await this.prisma.$transaction(async (tx) => {
+          const expireResult = await tx.subscription.updateMany({
+            where: { id: subscription.id, status: { not: SubscriptionStatus.EXPIRED } },
+            data: { status: SubscriptionStatus.EXPIRED },
+          });
 
-        await this.prisma.businessSettings.updateMany({
-          where: {
-            businessId: subscription.businessId,
-            readOnlyEnabled: false,
-          },
-          data: {
-            readOnlyEnabled: true,
-            readOnlyReason: 'Subscription expired.',
-            readOnlyEnabledAt: now,
-          },
-        });
+          // Another instance or guard already expired this subscription — skip follow-on effects
+          if (expireResult.count === 0) {
+            return null;
+          }
 
-        await this.prisma.business.updateMany({
-          where: {
-            id: subscription.businessId,
-            status: { not: 'EXPIRED' },
-          },
-          data: { status: 'EXPIRED' },
-        });
+          const refreshed = await tx.subscription.findUnique({
+            where: { id: subscription.id },
+            select: { id: true, status: true, expiresAt: true, businessId: true, tier: true },
+          });
 
-        await this.prisma.offlineDevice.updateMany({
-          where: { businessId: subscription.businessId, status: 'ACTIVE' },
-          data: { status: 'REVOKED', revokedAt: now },
-        });
-
-        await this.prisma.subscriptionHistory.create({
-          data: {
-            businessId: subscription.businessId,
-            previousStatus: subscription.status,
-            newStatus: SubscriptionStatus.EXPIRED,
-            previousTier: subscription.tier,
-            newTier: subscription.tier,
-            changedByPlatformAdminId: null,
-            reason: 'Auto-expired',
-            metadata: {
-              expiresAt: subscription.expiresAt?.toISOString() ?? null,
+          await tx.businessSettings.updateMany({
+            where: { businessId: subscription.businessId, readOnlyEnabled: false },
+            data: {
+              readOnlyEnabled: true,
+              readOnlyReason: 'Subscription expired.',
+              readOnlyEnabledAt: now,
             },
-          },
+          });
+
+          await tx.business.updateMany({
+            where: { id: subscription.businessId, status: { not: 'EXPIRED' } },
+            data: { status: 'EXPIRED' },
+          });
+
+          await tx.offlineDevice.updateMany({
+            where: { businessId: subscription.businessId, status: 'ACTIVE' },
+            data: { status: 'REVOKED', revokedAt: now },
+          });
+
+          await tx.subscriptionHistory.create({
+            data: {
+              businessId: subscription.businessId,
+              previousStatus: subscription.status,
+              newStatus: SubscriptionStatus.EXPIRED,
+              previousTier: subscription.tier,
+              newTier: subscription.tier,
+              changedByPlatformAdminId: null,
+              reason: 'Auto-expired',
+              metadata: { expiresAt: subscription.expiresAt?.toISOString() ?? null },
+            },
+          });
+
+          return refreshed;
         });
+
+        if (updated === null) {
+          return;
+        }
 
         await this.auditService.logEvent({
           businessId: subscription.businessId,
@@ -216,7 +216,7 @@ export class SubscriptionReminderService
             expiresAt: subscription.expiresAt,
             businessId: subscription.businessId,
           },
-          after: updated as unknown as Record<string, unknown>,
+          after: (updated ?? {}) as unknown as Record<string, unknown>,
         });
       }),
     );

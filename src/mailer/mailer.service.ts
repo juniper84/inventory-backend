@@ -51,7 +51,8 @@ export class MailerService {
 
   private async sendWithPostmark(payload: MailPayload) {
     if (!this.postmarkToken || !this.postmarkFromAddress) {
-      return { skipped: true };
+      // Fail loudly — silently skipping means auth emails (resets, invites) are lost (Fix G10-H5)
+      throw new Error('Postmark is not configured: missing server token or from address.');
     }
     const response = await fetch('https://api.postmarkapp.com/email', {
       method: 'POST',
@@ -78,7 +79,8 @@ export class MailerService {
 
   private async sendWithSes(payload: MailPayload) {
     if (!this.sesClient || !this.sesFromAddress) {
-      return { skipped: true };
+      // Fail loudly — silently skipping means auth emails (resets, invites) are lost (Fix G10-H5)
+      throw new Error('AWS SES is not configured: missing region, credentials, or from address.');
     }
 
     const command = new SendEmailCommand({

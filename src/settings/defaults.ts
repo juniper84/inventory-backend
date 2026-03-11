@@ -32,6 +32,7 @@ export const DEFAULT_POS_POLICIES = {
   receiptFooter: 'Thank you for your business.',
   showBranchContact: true,
   creditEnabled: false,
+  priceEditEnabled: false,
   shiftTrackingEnabled: false,
   shiftVarianceThreshold: 50000,
   discountThresholdPercent: 10,

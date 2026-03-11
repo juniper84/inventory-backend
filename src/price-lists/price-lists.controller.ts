@@ -12,6 +12,7 @@ import {
 import { PriceListsService } from './price-lists.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('price-lists')
 export class PriceListsController {
@@ -29,7 +30,7 @@ export class PriceListsController {
       status?: string;
     },
   ) {
-    return this.priceListsService.list(req.user?.businessId || '', query);
+    return this.priceListsService.list(requireBusinessId(req), query);
   }
 
   @Post()
@@ -42,8 +43,8 @@ export class PriceListsController {
       throw new BadRequestException('name is required.');
     }
     return this.priceListsService.create(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
     );
   }
@@ -57,8 +58,8 @@ export class PriceListsController {
     body: { name?: string; status?: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED' },
   ) {
     return this.priceListsService.update(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
       body,
     );
@@ -72,8 +73,8 @@ export class PriceListsController {
     @Body() body: { variantId: string; price: number },
   ) {
     return this.priceListsService.setItem(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
       body,
     );
@@ -87,8 +88,8 @@ export class PriceListsController {
     @Req() req: { user?: { businessId: string; sub?: string } },
   ) {
     return this.priceListsService.removeItem(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
       itemId,
     );

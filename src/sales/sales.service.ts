@@ -30,7 +30,7 @@ import {
 import { labelWithFallback } from '../common/labels';
 
 const DEFAULT_VAT_RATE = new Prisma.Decimal(18);
-const RECEIPT_RETRY_LIMIT = 3;
+const RECEIPT_RETRY_LIMIT = 20;
 
 const isReceiptNumberConflict = (error: unknown) => {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {
@@ -416,6 +416,7 @@ export class SalesService {
 
   private async buildReceiptNumber(
     tx: Prisma.TransactionClient,
+    businessId: string,
     branchId: string,
     branchName: string,
     issuedAt: Date,
@@ -428,6 +429,7 @@ export class SalesService {
 
     const count = await tx.receipt.count({
       where: {
+        businessId,
         issuedAt: { gte: start, lt: end },
         sale: { branchId },
       },
@@ -751,7 +753,7 @@ export class SalesService {
       eventKey: 'saleDrafted',
       actorUserId: userId,
       title: 'Sale drafted',
-      message: `Sale ${labelWithFallback({ id: sale.id })} created as draft.`,
+      message: `Sale ${labelWithFallback({ name: sale.customerNameSnapshot, id: sale.id })} created as draft.`,
       priority: 'INFO',
       metadata: { saleId: sale.id },
       branchId: sale.branchId,
@@ -786,12 +788,12 @@ export class SalesService {
       }
     }
 
-    const sale = await this.prisma.sale.findUnique({
-      where: { id: saleId },
+    const sale = await this.prisma.sale.findFirst({
+      where: { id: saleId, businessId },
       include: { lines: true },
     });
 
-    if (!sale || sale.businessId !== businessId) {
+    if (!sale) {
       return null;
     }
     if (sale.status !== SaleStatus.DRAFT) {
@@ -897,6 +899,10 @@ export class SalesService {
 
     if (!stockPolicies.negativeStockAllowed) {
       for (const line of sale.lines) {
+        const variant = variantMap.get(line.variantId);
+        if (!variant?.trackStock) {
+          continue;
+        }
         const snapshot = await this.prisma.stockSnapshot.findFirst({
           where: {
             businessId,
@@ -1044,6 +1050,13 @@ export class SalesService {
                   },
                 },
               });
+
+              if (
+                !stockPolicies.negativeStockAllowed &&
+                snapshot.quantity.lessThan(0)
+              ) {
+                throw new BadRequestException('Insufficient stock for sale.');
+              }
               attemptMovementEvents.push({
                 businessId,
                 userId,
@@ -1083,6 +1096,7 @@ export class SalesService {
             const issuedAt = new Date();
             const receiptNumber = await this.buildReceiptNumber(
               tx,
+              businessId,
               sale.branchId,
               branch.name,
               issuedAt,
@@ -1092,7 +1106,7 @@ export class SalesService {
             const paidAmount = new Prisma.Decimal(paymentsTotal);
             const outstandingAmount = sale.total.minus(paidAmount);
             const updatedSale = await tx.sale.update({
-              where: { id: saleId },
+              where: { id: saleId, businessId },
               data: {
                 status: SaleStatus.COMPLETED,
                 completedAt: issuedAt,
@@ -1113,6 +1127,7 @@ export class SalesService {
                 },
                 receipt: {
                   create: {
+                    businessId,
                     receiptNumber,
                     issuedAt,
                     data: {
@@ -1216,7 +1231,7 @@ export class SalesService {
       eventKey: 'saleCompleted',
       actorUserId: userId,
       title: 'Sale completed',
-      message: `Sale ${labelWithFallback({ id: sale.id })} completed.`,
+      message: `Sale ${labelWithFallback({ name: sale.customerNameSnapshot, id: sale.id })} completed.`,
       priority: 'INFO',
       metadata: { saleId: sale.id },
       branchId: sale.branchId,
@@ -1258,7 +1273,7 @@ export class SalesService {
       throw new BadRequestException('Only draft sales can be voided.');
     }
     const updated = await this.prisma.sale.update({
-      where: { id: saleId },
+      where: { id: saleId, businessId },
       data: { status: SaleStatus.VOIDED },
     });
 
@@ -1276,7 +1291,7 @@ export class SalesService {
       eventKey: 'saleVoided',
       actorUserId: userId,
       title: 'Sale voided',
-      message: `Sale ${labelWithFallback({ id: updated.id })} voided.`,
+      message: `Sale ${labelWithFallback({ name: sale.customerNameSnapshot, id: updated.id })} voided.`,
       priority: 'WARNING',
       metadata: { saleId: updated.id },
       branchId: updated.branchId,
@@ -1368,126 +1383,166 @@ export class SalesService {
       targetId: saleId,
     });
 
-    const refund = await this.prisma.saleRefund.create({
-      data: {
-        saleId,
-        businessId,
-        branchId: sale.branchId,
-        cashierId: sale.cashierId,
-        customerId: sale.customerId,
-        customerNameSnapshot: sale.customerNameSnapshot,
-        customerPhoneSnapshot: sale.customerPhoneSnapshot,
-        customerTinSnapshot: sale.customerTinSnapshot,
-        status: approval.required ? 'PENDING' : 'COMPLETED',
-        reason: data?.reason ?? null,
-        returnToStock,
-        total: refundTotal,
-        lines: {
-          create: refundLines.map((line) => ({
-            variantId: line.saleLine.variantId,
-            batchId: line.saleLine.batchId ?? null,
-            quantity: line.quantity,
-            unitId: line.saleLine.unitId ?? null,
-            unitFactor: line.unitFactor,
-            unitPrice: line.saleLine.unitPrice,
-            vatAmount: line.vatAmount,
-            lineTotal: line.lineTotal,
-          })),
-        },
-      },
-      include: { lines: true },
-    });
-
     if (approval.required) {
+      await this.prisma.saleRefund.create({
+        data: {
+          saleId,
+          businessId,
+          branchId: sale.branchId,
+          cashierId: sale.cashierId,
+          customerId: sale.customerId,
+          customerNameSnapshot: sale.customerNameSnapshot,
+          customerPhoneSnapshot: sale.customerPhoneSnapshot,
+          customerTinSnapshot: sale.customerTinSnapshot,
+          status: 'PENDING',
+          reason: data?.reason ?? null,
+          returnToStock,
+          total: refundTotal,
+          lines: {
+            create: refundLines.map((line) => ({
+              variantId: line.saleLine.variantId,
+              batchId: line.saleLine.batchId ?? null,
+              quantity: line.quantity,
+              unitId: line.saleLine.unitId ?? null,
+              unitFactor: line.unitFactor,
+              unitPrice: line.saleLine.unitPrice,
+              vatAmount: line.vatAmount,
+              lineTotal: line.lineTotal,
+            })),
+          },
+        },
+      });
       return { approvalRequired: true, approvalId: approval.approval?.id };
     }
 
-    if (returnToStock) {
-      for (const line of refundLines) {
-        const baseQuantity = line.quantity.mul(line.unitFactor);
-        const beforeSnapshot = await this.prisma.stockSnapshot.findFirst({
-          where: {
-            businessId,
-            branchId: sale.branchId,
-            variantId: line.saleLine.variantId,
-          },
-        });
-        const movement = await this.prisma.stockMovement.create({
-          data: {
-            businessId,
-            branchId: sale.branchId,
-            variantId: line.saleLine.variantId,
-            createdById: userId,
-            batchId: line.saleLine.batchId ?? null,
-            quantity: baseQuantity,
-            unitId: line.saleLine.unitId ?? null,
-            unitQuantity: line.quantity,
-            movementType: StockMovementType.RETURN_IN,
-          },
-        });
+    type RefundAuditEvent = Parameters<
+      typeof this.auditService.logEvent
+    >[0];
+    const refundStockAuditEvents: RefundAuditEvent[] = [];
 
-        const snapshot = await this.prisma.stockSnapshot.upsert({
-          where: {
-            businessId_branchId_variantId: {
+    const isFullRefund = refundTotal.greaterThanOrEqualTo(sale.total);
+    const { refund, updated } = await this.prisma.$transaction(async (tx) => {
+      const txRefund = await tx.saleRefund.create({
+        data: {
+          saleId,
+          businessId,
+          branchId: sale.branchId,
+          cashierId: sale.cashierId,
+          customerId: sale.customerId,
+          customerNameSnapshot: sale.customerNameSnapshot,
+          customerPhoneSnapshot: sale.customerPhoneSnapshot,
+          customerTinSnapshot: sale.customerTinSnapshot,
+          status: 'COMPLETED',
+          reason: data?.reason ?? null,
+          returnToStock,
+          total: refundTotal,
+          lines: {
+            create: refundLines.map((line) => ({
+              variantId: line.saleLine.variantId,
+              batchId: line.saleLine.batchId ?? null,
+              quantity: line.quantity,
+              unitId: line.saleLine.unitId ?? null,
+              unitFactor: line.unitFactor,
+              unitPrice: line.saleLine.unitPrice,
+              vatAmount: line.vatAmount,
+              lineTotal: line.lineTotal,
+            })),
+          },
+        },
+        include: { lines: true },
+      });
+
+      if (returnToStock) {
+        for (const line of refundLines) {
+          const baseQuantity = line.quantity.mul(line.unitFactor);
+          const beforeSnapshot = await tx.stockSnapshot.findFirst({
+            where: {
               businessId,
               branchId: sale.branchId,
               variantId: line.saleLine.variantId,
             },
-          },
-          create: {
-            businessId,
-            branchId: sale.branchId,
-            variantId: line.saleLine.variantId,
-            quantity: baseQuantity,
-          },
-          update: {
-            quantity: {
-              increment: baseQuantity,
+          });
+          const movement = await tx.stockMovement.create({
+            data: {
+              businessId,
+              branchId: sale.branchId,
+              variantId: line.saleLine.variantId,
+              createdById: userId,
+              batchId: line.saleLine.batchId ?? null,
+              quantity: baseQuantity,
+              unitId: line.saleLine.unitId ?? null,
+              unitQuantity: line.quantity,
+              movementType: StockMovementType.RETURN_IN,
             },
-          },
-        });
-        await this.auditService.logEvent({
-          businessId,
-          userId,
-          action: 'STOCK_MOVEMENT_CREATE',
-          resourceType: 'StockMovement',
-          resourceId: movement.id,
-          outcome: 'SUCCESS',
-          metadata: {
-            saleId,
-            refundId: refund.id,
-            branchId: sale.branchId,
-            variantId: line.saleLine.variantId,
-            batchId: line.saleLine.batchId ?? null,
-            quantity: Number(baseQuantity),
-            movementType: StockMovementType.RETURN_IN,
-          },
-          after: movement as unknown as Record<string, unknown>,
-        });
-        await this.auditService.logEvent({
-          businessId,
-          userId,
-          action: 'STOCK_SNAPSHOT_UPDATE',
-          resourceType: 'StockSnapshot',
-          resourceId: snapshot.id,
-          outcome: 'SUCCESS',
-          metadata: {
-            saleId,
-            refundId: refund.id,
-            branchId: sale.branchId,
-            variantId: line.saleLine.variantId,
-          },
-          before: beforeSnapshot as unknown as Record<string, unknown>,
-          after: snapshot as unknown as Record<string, unknown>,
-        });
-      }
-    }
+          });
 
-    const isFullRefund = refundTotal.greaterThanOrEqualTo(sale.total);
-    const updated = await this.prisma.sale.update({
-      where: { id: saleId },
-      data: { status: isFullRefund ? SaleStatus.REFUNDED : sale.status },
+          const snapshot = await tx.stockSnapshot.upsert({
+            where: {
+              businessId_branchId_variantId: {
+                businessId,
+                branchId: sale.branchId,
+                variantId: line.saleLine.variantId,
+              },
+            },
+            create: {
+              businessId,
+              branchId: sale.branchId,
+              variantId: line.saleLine.variantId,
+              quantity: baseQuantity,
+            },
+            update: {
+              quantity: {
+                increment: baseQuantity,
+              },
+            },
+          });
+          refundStockAuditEvents.push({
+            businessId,
+            userId,
+            action: 'STOCK_MOVEMENT_CREATE',
+            resourceType: 'StockMovement',
+            resourceId: movement.id,
+            outcome: 'SUCCESS',
+            metadata: {
+              saleId,
+              refundId: txRefund.id,
+              branchId: sale.branchId,
+              variantId: line.saleLine.variantId,
+              batchId: line.saleLine.batchId ?? null,
+              quantity: Number(baseQuantity),
+              movementType: StockMovementType.RETURN_IN,
+            },
+            after: movement as unknown as Record<string, unknown>,
+          });
+          refundStockAuditEvents.push({
+            businessId,
+            userId,
+            action: 'STOCK_SNAPSHOT_UPDATE',
+            resourceType: 'StockSnapshot',
+            resourceId: snapshot.id,
+            outcome: 'SUCCESS',
+            metadata: {
+              saleId,
+              refundId: txRefund.id,
+              branchId: sale.branchId,
+              variantId: line.saleLine.variantId,
+            },
+            before: beforeSnapshot as unknown as Record<string, unknown>,
+            after: snapshot as unknown as Record<string, unknown>,
+          });
+        }
+      }
+
+      const txUpdated = await tx.sale.update({
+        where: { id: saleId },
+        data: { status: isFullRefund ? SaleStatus.REFUNDED : sale.status },
+      });
+      return { refund: txRefund, updated: txUpdated };
     });
+
+    for (const event of refundStockAuditEvents) {
+      await this.auditService.logEvent(event);
+    }
 
     await this.auditService.logEvent({
       businessId,
@@ -1505,7 +1560,7 @@ export class SalesService {
       eventKey: 'saleRefunded',
       actorUserId: userId,
       title: 'Sale refunded',
-      message: `Sale ${labelWithFallback({ id: updated.id })} refunded.`,
+      message: `Sale ${labelWithFallback({ name: sale.customerNameSnapshot, id: updated.id })} refunded.`,
       priority: 'WARNING',
       metadata: { saleId: updated.id },
       branchId: updated.branchId,
@@ -1532,7 +1587,7 @@ export class SalesService {
       return null;
     }
     if (sale.outstandingAmount.lte(0)) {
-      return { error: 'Sale has no outstanding balance.' };
+      throw new BadRequestException('Sale has no outstanding balance.');
     }
     const amount = new Prisma.Decimal(data.amount);
     if (amount.lte(0)) {
@@ -1541,23 +1596,26 @@ export class SalesService {
     if (amount.greaterThan(sale.outstandingAmount)) {
       throw new BadRequestException('Settlement exceeds outstanding balance.');
     }
-    const settlement = await this.prisma.saleSettlement.create({
-      data: {
-        saleId: sale.id,
-        businessId,
-        amount,
-        method: data.method,
-        methodLabel: data.methodLabel ?? null,
-        reference: data.reference ?? null,
-        receivedById: userId,
-      },
-    });
-    const updated = await this.prisma.sale.update({
-      where: { id: sale.id },
-      data: {
-        paidAmount: { increment: amount },
-        outstandingAmount: { decrement: amount },
-      },
+    const { settlement, updated } = await this.prisma.$transaction(async (tx) => {
+      const settlement = await tx.saleSettlement.create({
+        data: {
+          saleId: sale.id,
+          businessId,
+          amount,
+          method: data.method,
+          methodLabel: data.methodLabel ?? null,
+          reference: data.reference ?? null,
+          receivedById: userId,
+        },
+      });
+      const updated = await tx.sale.update({
+        where: { id: sale.id },
+        data: {
+          paidAmount: { increment: amount },
+          outstandingAmount: { decrement: amount },
+        },
+      });
+      return { settlement, updated };
     });
     await this.auditService.logEvent({
       businessId,
@@ -1603,6 +1661,17 @@ export class SalesService {
         })
       : null;
 
+    const variantIds = data.items.map((item) => item.variantId);
+    const validVariants = await this.prisma.variant.findMany({
+      where: { id: { in: variantIds }, businessId },
+      select: { id: true },
+    });
+    if (validVariants.length !== variantIds.length) {
+      throw new BadRequestException(
+        'One or more variants do not belong to this business.',
+      );
+    }
+
     const posPolicies = await this.getPosPolicies(businessId);
     const returnToStock =
       data.returnToStock ?? posPolicies.refundReturnToStockDefault ?? true;
@@ -1624,126 +1693,182 @@ export class SalesService {
       new Prisma.Decimal(0),
     );
 
-    const refund = await this.prisma.saleRefund.create({
-      data: {
-        saleId: null,
-        businessId,
-        branchId: data.branchId,
-        cashierId: userId,
-        customerId: customer?.id ?? null,
-        customerNameSnapshot: customer?.name ?? null,
-        customerPhoneSnapshot: customer?.phone ?? null,
-        customerTinSnapshot: customer?.tin ?? null,
-        status: approval.required ? 'PENDING' : 'COMPLETED',
-        reason: data.reason ?? null,
-        returnToStock,
-        isReturnOnly: true,
-        total,
-        lines: {
-          create: await Promise.all(
-            data.items.map(async (item) => {
-              const unitResolution = await this.unitsService.resolveUnitFactor({
-                businessId,
-                variantId: item.variantId,
-                unitId: item.unitId,
-              });
-              return {
-                variantId: item.variantId,
-                quantity: new Prisma.Decimal(item.quantity),
-                unitId: unitResolution.unitId,
-                unitFactor: unitResolution.unitFactor,
-                unitPrice: new Prisma.Decimal(item.unitPrice),
-                vatAmount: new Prisma.Decimal(0),
-                lineTotal: new Prisma.Decimal(item.unitPrice).mul(
-                  item.quantity,
-                ),
-              };
-            }),
-          ),
-        },
-      },
-      include: { lines: true },
-    });
+    // Pre-compute unit resolutions outside the transaction (async service calls cannot run inside)
+    const resolvedLines = await Promise.all(
+      data.items.map(async (item) => {
+        const unitResolution = await this.unitsService.resolveUnitFactor({
+          businessId,
+          variantId: item.variantId,
+          unitId: item.unitId,
+        });
+        return { ...item, ...unitResolution };
+      }),
+    );
 
     if (approval.required) {
+      // No stock writes needed — create a PENDING refund and return immediately
+      const pendingRefund = await this.prisma.saleRefund.create({
+        data: {
+          saleId: null,
+          businessId,
+          branchId: data.branchId,
+          cashierId: userId,
+          customerId: customer?.id ?? null,
+          customerNameSnapshot: customer?.name ?? null,
+          customerPhoneSnapshot: customer?.phone ?? null,
+          customerTinSnapshot: customer?.tin ?? null,
+          status: 'PENDING',
+          reason: data.reason ?? null,
+          returnToStock,
+          isReturnOnly: true,
+          total,
+          lines: {
+            create: resolvedLines.map((item) => ({
+              variantId: item.variantId,
+              quantity: new Prisma.Decimal(item.quantity),
+              unitId: item.unitId,
+              unitFactor: item.unitFactor,
+              unitPrice: new Prisma.Decimal(item.unitPrice),
+              vatAmount: new Prisma.Decimal(0),
+              lineTotal: new Prisma.Decimal(item.unitPrice).mul(item.quantity),
+            })),
+          },
+        },
+        include: { lines: true },
+      });
+      void pendingRefund;
       return { approvalRequired: true, approvalId: approval.approval?.id };
     }
 
-    if (returnToStock) {
-      for (const line of refund.lines) {
-        const unitFactor = line.unitFactor ?? new Prisma.Decimal(1);
-        const baseQuantity = line.quantity.mul(unitFactor);
-        const beforeSnapshot = await this.prisma.stockSnapshot.findFirst({
-          where: {
-            businessId,
-            branchId: data.branchId,
-            variantId: line.variantId,
+    // Wrap saleRefund.create + all stock writes in one $transaction so a partial
+    // write cannot leave a COMPLETED refund with unrestored stock (Fix P3-G2-H10)
+    const stockAuditEntries: {
+      movement: { id: string } & Record<string, unknown>;
+      snapshot: { id: string } & Record<string, unknown>;
+      beforeSnapshot: Record<string, unknown> | null;
+      variantId: string;
+      baseQuantity: Prisma.Decimal;
+    }[] = [];
+
+    const refund = await this.prisma.$transaction(async (tx) => {
+      const createdRefund = await tx.saleRefund.create({
+        data: {
+          saleId: null,
+          businessId,
+          branchId: data.branchId,
+          cashierId: userId,
+          customerId: customer?.id ?? null,
+          customerNameSnapshot: customer?.name ?? null,
+          customerPhoneSnapshot: customer?.phone ?? null,
+          customerTinSnapshot: customer?.tin ?? null,
+          status: 'COMPLETED',
+          reason: data.reason ?? null,
+          returnToStock,
+          isReturnOnly: true,
+          total,
+          lines: {
+            create: resolvedLines.map((item) => ({
+              variantId: item.variantId,
+              quantity: new Prisma.Decimal(item.quantity),
+              unitId: item.unitId,
+              unitFactor: item.unitFactor,
+              unitPrice: new Prisma.Decimal(item.unitPrice),
+              vatAmount: new Prisma.Decimal(0),
+              lineTotal: new Prisma.Decimal(item.unitPrice).mul(item.quantity),
+            })),
           },
-        });
-        const movement = await this.prisma.stockMovement.create({
-          data: {
-            businessId,
-            branchId: data.branchId,
-            variantId: line.variantId,
-            createdById: userId,
-            quantity: baseQuantity,
-            unitId: line.unitId ?? null,
-            unitQuantity: line.quantity,
-            movementType: StockMovementType.RETURN_IN,
-          },
-        });
-        const snapshot = await this.prisma.stockSnapshot.upsert({
-          where: {
-            businessId_branchId_variantId: {
+        },
+        include: { lines: true },
+      });
+
+      if (returnToStock) {
+        for (const line of createdRefund.lines) {
+          const unitFactor = line.unitFactor ?? new Prisma.Decimal(1);
+          const baseQuantity = line.quantity.mul(unitFactor);
+          const beforeSnapshot = await tx.stockSnapshot.findFirst({
+            where: {
               businessId,
               branchId: data.branchId,
               variantId: line.variantId,
             },
-          },
-          create: {
-            businessId,
-            branchId: data.branchId,
+          });
+          const movement = await tx.stockMovement.create({
+            data: {
+              businessId,
+              branchId: data.branchId,
+              variantId: line.variantId,
+              createdById: userId,
+              quantity: baseQuantity,
+              unitId: line.unitId ?? null,
+              unitQuantity: line.quantity,
+              movementType: StockMovementType.RETURN_IN,
+            },
+          });
+          const snapshot = await tx.stockSnapshot.upsert({
+            where: {
+              businessId_branchId_variantId: {
+                businessId,
+                branchId: data.branchId,
+                variantId: line.variantId,
+              },
+            },
+            create: {
+              businessId,
+              branchId: data.branchId,
+              variantId: line.variantId,
+              quantity: baseQuantity,
+            },
+            update: {
+              quantity: { increment: baseQuantity },
+            },
+          });
+          stockAuditEntries.push({
+            movement: movement as unknown as { id: string } & Record<string, unknown>,
+            snapshot: snapshot as unknown as { id: string } & Record<string, unknown>,
+            beforeSnapshot: beforeSnapshot as unknown as Record<string, unknown> | null,
             variantId: line.variantId,
-            quantity: baseQuantity,
-          },
-          update: {
-            quantity: { increment: baseQuantity },
-          },
-        });
-        await this.auditService.logEvent({
-          businessId,
-          userId,
-          action: 'STOCK_MOVEMENT_CREATE',
-          resourceType: 'StockMovement',
-          resourceId: movement.id,
-          outcome: 'SUCCESS',
-          metadata: {
-            saleId: refund.saleId,
-            refundId: refund.id,
-            branchId: data.branchId,
-            variantId: line.variantId,
-            quantity: Number(baseQuantity),
-            movementType: StockMovementType.RETURN_IN,
-          },
-          after: movement as unknown as Record<string, unknown>,
-        });
-        await this.auditService.logEvent({
-          businessId,
-          userId,
-          action: 'STOCK_SNAPSHOT_UPDATE',
-          resourceType: 'StockSnapshot',
-          resourceId: snapshot.id,
-          outcome: 'SUCCESS',
-          metadata: {
-            saleId: refund.saleId,
-            refundId: refund.id,
-            branchId: data.branchId,
-            variantId: line.variantId,
-          },
-          before: beforeSnapshot as unknown as Record<string, unknown>,
-          after: snapshot as unknown as Record<string, unknown>,
-        });
+            baseQuantity,
+          });
+        }
       }
+
+      return createdRefund;
+    });
+
+    for (const entry of stockAuditEntries) {
+      await this.auditService.logEvent({
+        businessId,
+        userId,
+        action: 'STOCK_MOVEMENT_CREATE',
+        resourceType: 'StockMovement',
+        resourceId: entry.movement.id,
+        outcome: 'SUCCESS',
+        metadata: {
+          saleId: refund.saleId,
+          refundId: refund.id,
+          branchId: data.branchId,
+          variantId: entry.variantId,
+          quantity: Number(entry.baseQuantity),
+          movementType: StockMovementType.RETURN_IN,
+        },
+        after: entry.movement,
+      });
+      await this.auditService.logEvent({
+        businessId,
+        userId,
+        action: 'STOCK_SNAPSHOT_UPDATE',
+        resourceType: 'StockSnapshot',
+        resourceId: entry.snapshot.id,
+        outcome: 'SUCCESS',
+        metadata: {
+          saleId: refund.saleId,
+          refundId: refund.id,
+          branchId: data.branchId,
+          variantId: entry.variantId,
+        },
+        before: entry.beforeSnapshot ?? undefined,
+        after: entry.snapshot,
+      });
     }
 
     await this.auditService.logEvent({

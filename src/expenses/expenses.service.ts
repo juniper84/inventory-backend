@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
@@ -68,7 +68,11 @@ export class ExpensesService {
   ) {
     const pagination = parsePagination(query);
     const search = query.search?.trim();
-    const status = query.status?.toLowerCase();
+    const VALID_STATUS_FILTERS = new Set(['transfer', 'direct', 'pending', 'approved', 'rejected']);
+    const rawStatus = query.status?.toLowerCase();
+    // P4-SW1-L5: Validate status filter — only known values are passed to Prisma.
+    // Unknown values are silently ignored to avoid leaking schema details.
+    const status = rawStatus && VALID_STATUS_FILTERS.has(rawStatus) ? rawStatus : undefined;
     const from = query.from ? new Date(query.from) : undefined;
     const to = query.to ? new Date(query.to) : undefined;
     const branchFilter = this.resolveBranchScope(branchScope, query.branchId);
@@ -152,13 +156,13 @@ export class ExpensesService {
     },
   ) {
     if (!data.branchId || !data.amount || data.amount <= 0) {
-      return { error: 'Invalid expense amount.' };
+      throw new BadRequestException('Invalid expense amount.');
     }
     const branch = await this.prisma.branch.findFirst({
       where: { id: data.branchId, businessId },
     });
     if (!branch) {
-      return null;
+      throw new NotFoundException('Branch not found.');
     }
 
     const defaults = await this.getApprovalDefaults(businessId);

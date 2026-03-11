@@ -68,9 +68,7 @@ export class SupportChatContextService {
       module,
       user: {
         id: user.sub,
-        email: user.email,
         scope: user.scope ?? 'business',
-        role_ids: user.roleIds ?? [],
         permission_codes: user.permissions ?? [],
       },
       scope: {

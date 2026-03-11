@@ -11,6 +11,7 @@ import {
 import { RolesService } from './roles.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('roles')
 export class RolesController {
@@ -29,7 +30,7 @@ export class RolesController {
       permissionCount?: string;
     },
   ) {
-    return this.rolesService.list(req.user?.businessId || '', query);
+    return this.rolesService.list(requireBusinessId(req), query);
   }
 
   @Get('permissions')
@@ -44,38 +45,39 @@ export class RolesController {
     @Param('id') id: string,
     @Req() req: { user?: { businessId: string } },
   ) {
-    return this.rolesService.getRolePermissions(req.user?.businessId || '', id);
+    return this.rolesService.getRolePermissions(requireBusinessId(req), id);
   }
 
   @Post()
   @Permissions(PermissionsList.ROLES_CREATE)
   create(
-    @Req() req: { user?: { businessId: string } },
-    @Body() body: { name: string; isSystem?: boolean },
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Body() body: { name: string; approvalTier?: number },
   ) {
-    return this.rolesService.create(req.user?.businessId || '', body);
+    return this.rolesService.create(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Put(':id')
   @Permissions(PermissionsList.ROLES_UPDATE)
   update(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
-    @Body() body: { name?: string },
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Body() body: { name?: string; approvalTier?: number },
   ) {
-    return this.rolesService.update(req.user?.businessId || '', id, body);
+    return this.rolesService.update(requireBusinessId(req), id, requireUserId(req), body);
   }
 
   @Put(':id/permissions')
   @Permissions(PermissionsList.ROLES_UPDATE)
   setRolePermissions(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body() body: { permissionIds: string[] },
   ) {
     return this.rolesService.setRolePermissions(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
+      requireUserId(req),
       body.permissionIds ?? [],
     );
   }

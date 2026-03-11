@@ -12,6 +12,8 @@ import { ExpensesService } from './expenses.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
 import { ExpenseCategory } from '@prisma/client';
+import { requireBusinessId, requireUserId } from '../common/request-context';
+import { VALID_CURRENCY_CODES } from '../common/currency-codes';
 
 @Controller('expenses')
 export class ExpensesController {
@@ -35,7 +37,7 @@ export class ExpensesController {
     },
   ) {
     return this.expensesService.list(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -71,9 +73,12 @@ export class ExpensesController {
         throw new BadRequestException('Invalid expense category.');
       }
     }
+    if (body.currency && !VALID_CURRENCY_CODES.has(body.currency.toUpperCase())) {
+      throw new BadRequestException('Invalid currency code.');
+    }
     return this.expensesService.create(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       body,
     );

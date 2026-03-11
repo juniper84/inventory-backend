@@ -62,30 +62,37 @@ export class PriceListsService {
     listId: string,
     data: { name?: string; status?: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED' },
   ) {
-    const existing = await this.prisma.priceList.findFirst({
-      where: { id: listId, businessId },
+    // Wrap ownership check + update atomically to prevent TOCTOU race (Fix P3-G6-M4)
+    const txResult = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.priceList.findFirst({
+        where: { id: listId, businessId },
+      });
+      if (!existing) {
+        return null;
+      }
+      const updated = await tx.priceList.update({
+        where: { id: listId },
+        data: {
+          name: data.name ?? existing.name,
+          status: (data.status ?? existing.status) as any,
+        },
+      });
+      return { existing, updated };
     });
-    if (!existing) {
+    if (!txResult) {
       return null;
     }
-    const updated = await this.prisma.priceList.update({
-      where: { id: listId },
-      data: {
-        name: data.name ?? existing.name,
-        status: (data.status ?? existing.status) as any,
-      },
-    });
     await this.auditService.logEvent({
       businessId,
       userId,
       action: 'PRICE_LIST_UPDATE',
       resourceType: 'PriceList',
-      resourceId: updated.id,
+      resourceId: txResult.updated.id,
       outcome: 'SUCCESS',
-      before: existing as unknown as Record<string, unknown>,
-      after: updated as unknown as Record<string, unknown>,
+      before: txResult.existing as unknown as Record<string, unknown>,
+      after: txResult.updated as unknown as Record<string, unknown>,
     });
-    return updated;
+    return txResult.updated;
   }
 
   async setItem(
@@ -100,6 +107,15 @@ export class PriceListsService {
     if (!list) {
       return null;
     }
+
+    // Verify the variant belongs to this business before writing (Fix P3-G6-C1)
+    const variant = await this.prisma.variant.findFirst({
+      where: { id: data.variantId, product: { businessId } },
+    });
+    if (!variant) {
+      return null;
+    }
+
     const item = await this.prisma.priceListItem.upsert({
       where: {
         priceListId_variantId: {
@@ -132,13 +148,26 @@ export class PriceListsService {
     listId: string,
     itemId: string,
   ) {
-    const item = await this.prisma.priceListItem.findFirst({
-      where: { id: itemId, priceListId: listId },
+    // Wrap ownership checks + delete atomically to prevent TOCTOU race (Fix P4-D-H9)
+    const found = await this.prisma.$transaction(async (tx) => {
+      const list = await tx.priceList.findFirst({
+        where: { id: listId, businessId },
+      });
+      if (!list) {
+        return false;
+      }
+      const item = await tx.priceListItem.findFirst({
+        where: { id: itemId, priceListId: listId },
+      });
+      if (!item) {
+        return false;
+      }
+      await tx.priceListItem.delete({ where: { id: itemId, priceListId: listId } });
+      return true;
     });
-    if (!item) {
+    if (!found) {
       return null;
     }
-    await this.prisma.priceListItem.delete({ where: { id: itemId } });
     await this.auditService.logEvent({
       businessId,
       userId,

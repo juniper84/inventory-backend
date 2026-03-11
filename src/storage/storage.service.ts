@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   GetObjectCommand,
@@ -62,20 +62,41 @@ export class StorageService {
   }
 
   buildObjectKey(path: string) {
+    // Prevent path traversal: reject segments containing '..' or null bytes (Fix P3-G7-C1)
+    if (/\.\.|[\x00]/.test(path)) {
+      throw new BadRequestException('Invalid storage path.');
+    }
     const cleanedPrefix = this.prefix
       ? this.prefix.replace(/^\//, '').replace(/\/$/, '') + '/'
       : '';
     return `${cleanedPrefix}${path}`.replace(/\/{2,}/g, '/');
   }
 
+  private static readonly ALLOWED_UPLOAD_CONTENT_TYPES = new Set([
+    'image/jpeg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+    'application/pdf',
+    'text/csv',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel',
+  ]);
+
   async createPresignedUpload(params: { key: string; contentType?: string }) {
     if (!this.bucket) {
       throw new Error('S3 bucket not configured.');
     }
+    const contentType = params.contentType ?? 'application/octet-stream';
+    if (!StorageService.ALLOWED_UPLOAD_CONTENT_TYPES.has(contentType)) {
+      throw new BadRequestException(
+        `Content type '${contentType}' is not permitted for upload.`,
+      );
+    }
     const command = new PutObjectCommand({
       Bucket: this.bucket,
       Key: params.key,
-      ContentType: params.contentType,
+      ContentType: contentType,
     });
     const url = await getSignedUrl(this.client, command, {
       expiresIn: this.presignTtlSeconds,
@@ -115,9 +136,23 @@ export class StorageService {
     };
   }
 
-  async createPresignedDownload(params: { key: string }) {
+  async createPresignedDownload(params: {
+    key: string;
+    /** When supplied, the key must start with this prefix — enforces tenant ownership (Fix P3-G7-C2) */
+    allowedPrefix?: string;
+  }) {
     if (!this.bucket) {
       throw new Error('S3 bucket not configured.');
+    }
+    // Prevent path traversal in the supplied key
+    if (/\.\.|[\x00]/.test(params.key)) {
+      throw new BadRequestException('Invalid storage key.');
+    }
+    if (
+      params.allowedPrefix &&
+      !params.key.startsWith(params.allowedPrefix)
+    ) {
+      throw new ForbiddenException('Access to the requested file is not allowed.');
     }
     const command = new GetObjectCommand({
       Bucket: this.bucket,

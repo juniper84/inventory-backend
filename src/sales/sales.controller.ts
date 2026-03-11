@@ -11,6 +11,7 @@ import {
 import { SalesService } from './sales.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('sales')
 export class SalesController {
@@ -53,8 +54,8 @@ export class SalesController {
       throw new BadRequestException('lines are required.');
     }
     return this.salesService.createDraft(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       req.user?.permissions || [],
       body,
@@ -85,9 +86,9 @@ export class SalesController {
       throw new BadRequestException('saleId is required.');
     }
     return this.salesService.completeSale(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       body.saleId,
-      req.user?.sub || 'system',
+      requireUserId(req),
       {
         payments: body.payments,
         idempotencyKey: body.idempotencyKey,
@@ -104,9 +105,9 @@ export class SalesController {
     @Param('id') id: string,
   ) {
     return this.salesService.voidSale(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || 'system',
+      requireUserId(req),
     );
   }
 
@@ -124,9 +125,9 @@ export class SalesController {
     },
   ) {
     return this.salesService.refundSale(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || 'system',
+      requireUserId(req),
       req.user?.roleIds || [],
       body,
     );
@@ -146,9 +147,9 @@ export class SalesController {
     },
   ) {
     return this.salesService.recordSettlement(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || 'system',
+      requireUserId(req),
       body,
     );
   }
@@ -173,8 +174,8 @@ export class SalesController {
     },
   ) {
     return this.salesService.returnWithoutReceipt(
-      req.user?.businessId || '',
-      req.user?.sub || 'system',
+      requireBusinessId(req),
+      requireUserId(req),
       req.user?.roleIds || [],
       body,
     );
@@ -198,7 +199,7 @@ export class SalesController {
     },
   ) {
     return this.salesService.listReceipts(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -211,9 +212,9 @@ export class SalesController {
     @Param('id') id: string,
   ) {
     return this.salesService.reprintReceipt(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || 'system',
+      requireUserId(req),
     );
   }
 }

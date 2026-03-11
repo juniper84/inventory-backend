@@ -137,16 +137,16 @@ const DEFAULT_RECIPIENTS: NotificationRecipientConfig = {
   userIds: [],
   includeOwners: true,
   includeManagers: false,
-  branchScoped: true,
+  branchScoped: false,
 };
 
 const DEFAULT_EVENT_SETTINGS: NotificationEventSettings = {
-  enabled: true,
+  enabled: false,
 };
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   channels: {
-    email: true,
+    email: false,
     sms: false,
     whatsapp: false,
   },
@@ -160,7 +160,7 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
     (acc, key) => {
       acc[key] = {
         channels: {
-          email: true,
+          email: false,
           sms: false,
           whatsapp: false,
         },

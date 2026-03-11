@@ -9,6 +9,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from '../auth/auth.service';
 import { Public } from '../auth/public.decorator';
 import { PlatformService } from './platform.service';
@@ -23,6 +24,7 @@ import {
   SubscriptionTier,
 } from '@prisma/client';
 import { SupportAccessService } from '../support-access/support-access.service';
+import { requireUserId } from '../common/request-context';
 
 @Controller('platform')
 export class PlatformController {
@@ -34,8 +36,24 @@ export class PlatformController {
 
   @Post('auth/login')
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async login(@Body() body: { email: string; password: string }) {
     return this.authService.signInPlatformAdmin(body.email, body.password);
+  }
+
+  @Post('auth/refresh')
+  @Public()
+  async refresh(@Body() body: { refreshToken: string }) {
+    return this.authService.refreshPlatformAdminToken(body.refreshToken);
+  }
+
+  @Post('auth/logout')
+  @Public()
+  async logout(@Body() body: { refreshToken?: string }) {
+    if (body.refreshToken) {
+      await this.authService.logoutPlatformAdmin(body.refreshToken);
+    }
+    return { success: true };
   }
 
   @Post('auth/password')
@@ -45,7 +63,7 @@ export class PlatformController {
     @Body() body: { currentPassword: string; newPassword: string },
   ) {
     return this.platformService.changePlatformAdminPassword({
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       currentPassword: body.currentPassword,
       newPassword: body.newPassword,
     });
@@ -54,6 +72,7 @@ export class PlatformController {
   @Post('businesses')
   @UseGuards(PlatformGuard)
   async createBusiness(
+    @Req() req: { user?: { sub?: string } },
     @Body()
     body: {
       businessName: string;
@@ -63,7 +82,7 @@ export class PlatformController {
       tier?: SubscriptionTier;
     },
   ) {
-    return this.platformService.provisionBusiness(body);
+    return this.platformService.provisionBusiness({ ...body, actorId: requireUserId(req) });
   }
 
   @Get('businesses')
@@ -213,7 +232,7 @@ export class PlatformController {
     return this.platformService.updateBusinessStatus(
       id,
       body.status,
-      req.user?.sub || '',
+      requireUserId(req),
       body.reason,
       body.expectedUpdatedAt ? new Date(body.expectedUpdatedAt) : null,
       body.idempotencyKey,
@@ -236,7 +255,7 @@ export class PlatformController {
     return this.platformService.updateReadOnly(id, {
       enabled: body.enabled,
       reason: body.reason,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       expectedUpdatedAt: body.expectedUpdatedAt
         ? new Date(body.expectedUpdatedAt)
         : null,
@@ -263,7 +282,7 @@ export class PlatformController {
     },
   ) {
     return this.platformService.updateSubscription(businessId, {
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       tier: body.tier,
       status: body.status,
       limits: body.limits,
@@ -295,7 +314,7 @@ export class PlatformController {
   ) {
     return this.platformService.recordSubscriptionPurchase({
       businessId,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       tier: body.tier,
       durationDays: body.durationDays,
       startsAt: body.startsAt ? new Date(body.startsAt) : null,
@@ -324,7 +343,7 @@ export class PlatformController {
   ) {
     return this.platformService.purgeBusiness(
       id,
-      req.user?.sub || '',
+      requireUserId(req),
       body.reason,
       body.confirmBusinessId,
       body.confirmText,
@@ -337,10 +356,11 @@ export class PlatformController {
   @Post('businesses/:id/purge-preflight')
   @UseGuards(PlatformGuard)
   purgeBusinessPreflight(
+    @Req() req: { user?: { sub?: string } },
     @Param('id') id: string,
     @Body() body: { reason?: string },
   ) {
-    return this.platformService.getPurgePreflight(id, body.reason);
+    return this.platformService.getPurgePreflight(id, requireUserId(req), body.reason);
   }
 
   @Post('support-access/requests')
@@ -359,7 +379,7 @@ export class PlatformController {
   ) {
     return this.supportAccessService.createRequest({
       businessId: body.businessId,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
       scope: body.scope,
       durationHours: body.durationHours,
@@ -412,7 +432,7 @@ export class PlatformController {
   ) {
     return this.supportAccessService.revokeSession({
       sessionId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
     });
   }
@@ -425,7 +445,7 @@ export class PlatformController {
   ) {
     return this.supportAccessService.activateRequest({
       requestId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
     });
   }
 
@@ -443,7 +463,7 @@ export class PlatformController {
   ) {
     return this.platformService.requestExportOnExit({
       businessId: body.businessId,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
     });
   }
@@ -457,7 +477,7 @@ export class PlatformController {
   ) {
     return this.platformService.markExportDelivered({
       exportJobId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       deliveredAt: body.deliveredAt ? new Date(body.deliveredAt) : undefined,
       reason: body.reason,
     });
@@ -507,7 +527,7 @@ export class PlatformController {
   ) {
     return this.platformService.retryExportJob({
       exportJobId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
     });
   }
@@ -521,7 +541,7 @@ export class PlatformController {
   ) {
     return this.platformService.requeueExportJob({
       exportJobId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
     });
   }
@@ -535,7 +555,7 @@ export class PlatformController {
   ) {
     return this.platformService.cancelExportJob({
       exportJobId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
     });
   }
@@ -576,7 +596,7 @@ export class PlatformController {
       severity: body.severity,
       ownerPlatformAdminId: body.ownerPlatformAdminId,
       metadata: body.metadata,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
     });
   }
 
@@ -596,7 +616,7 @@ export class PlatformController {
   ) {
     return this.platformService.updateIncident({
       incidentId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       title: body.title,
       reason: body.reason,
       severity: body.severity,
@@ -619,7 +639,7 @@ export class PlatformController {
   ) {
     return this.platformService.transitionIncident({
       incidentId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       toStatus: body.toStatus,
       reason: body.reason,
       note: body.note,
@@ -635,7 +655,7 @@ export class PlatformController {
   ) {
     return this.platformService.addIncidentNote({
       incidentId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       note: body.note,
       metadata: body.metadata,
     });
@@ -650,7 +670,7 @@ export class PlatformController {
   ) {
     return this.platformService.approveSubscriptionRequest({
       requestId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       responseNote: body.responseNote,
     });
   }
@@ -664,7 +684,7 @@ export class PlatformController {
   ) {
     return this.platformService.rejectSubscriptionRequest({
       requestId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       responseNote: body.responseNote,
     });
   }
@@ -688,7 +708,7 @@ export class PlatformController {
       underReview: body.underReview,
       reason: body.reason,
       severity: body.severity,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       expectedUpdatedAt: body.expectedUpdatedAt
         ? new Date(body.expectedUpdatedAt)
         : null,
@@ -710,7 +730,7 @@ export class PlatformController {
   ) {
     return this.platformService.revokeBusinessSessions({
       businessId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
       expectedUpdatedAt: body.expectedUpdatedAt
         ? new Date(body.expectedUpdatedAt)
@@ -736,7 +756,7 @@ export class PlatformController {
   ) {
     return this.platformService.updateRateLimits({
       businessId: id,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       limit: body.limit ?? null,
       ttlSeconds: body.ttlSeconds ?? null,
       expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
@@ -775,7 +795,7 @@ export class PlatformController {
   ) {
     return this.platformService.revokeOfflineDevice({
       deviceId,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
     });
   }
@@ -803,7 +823,7 @@ export class PlatformController {
       severity: body.severity,
       startsAt: body.startsAt ? new Date(body.startsAt) : undefined,
       endsAt: body.endsAt ? new Date(body.endsAt) : null,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
       reason: body.reason,
       targetBusinessIds: body.targetBusinessIds,
       targetTiers: body.targetTiers,
@@ -842,7 +862,7 @@ export class PlatformController {
   ) {
     return this.platformService.endAnnouncement({
       announcementId,
-      platformAdminId: req.user?.sub || '',
+      platformAdminId: requireUserId(req),
     });
   }
 }

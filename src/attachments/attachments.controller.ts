@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import { AttachmentsService } from './attachments.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('attachments')
 export class AttachmentsController {
@@ -10,7 +11,7 @@ export class AttachmentsController {
   @Post()
   @Permissions(PermissionsList.ATTACHMENTS_WRITE)
   create(
-    @Req() req: { user?: { businessId: string; branchScope?: string[] } },
+    @Req() req: { user?: { businessId: string; sub?: string; branchScope?: string[] } },
     @Body()
     body: {
       purchaseId?: string;
@@ -23,14 +24,15 @@ export class AttachmentsController {
     },
   ) {
     return this.attachmentsService.create(
-      req.user?.businessId || '',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
       req.user?.branchScope ?? [],
     );
   }
 
   @Get()
-  @Permissions(PermissionsList.ATTACHMENTS_WRITE)
+  @Permissions(PermissionsList.ATTACHMENTS_READ)
   list(
     @Req() req: { user?: { businessId: string; branchScope?: string[] } },
     @Query()
@@ -42,7 +44,7 @@ export class AttachmentsController {
     },
   ) {
     return this.attachmentsService.list(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       query,
       req.user?.branchScope ?? [],
     );
@@ -61,7 +63,7 @@ export class AttachmentsController {
     },
   ) {
     return this.attachmentsService.createPresignedUpload(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       body,
       req.user?.branchScope ?? [],
     );
@@ -71,11 +73,12 @@ export class AttachmentsController {
   @Permissions(PermissionsList.ATTACHMENTS_WRITE)
   remove(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string; branchScope?: string[] } },
+    @Req() req: { user?: { businessId: string; sub?: string; branchScope?: string[] } },
   ) {
     return this.attachmentsService.remove(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
+      requireUserId(req),
       req.user?.branchScope ?? [],
     );
   }

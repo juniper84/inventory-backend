@@ -8,11 +8,16 @@ describe('UsersService', () => {
     const subscriptionService = { assertLimit: jest.fn() } as any;
     const mailerService = { sendEmail: jest.fn() } as any;
 
+    const i18n = { t: jest.fn().mockReturnValue('') } as any;
+    const configService = { get: jest.fn() } as any;
+
     const service = new UsersService(
       prisma,
       auditService,
       subscriptionService,
       mailerService,
+      i18n,
+      configService,
     );
 
     await service.list('business-1', {});

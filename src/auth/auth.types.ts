@@ -9,4 +9,6 @@ export type JwtPayload = {
   subscriptionState: string;
   scope?: 'platform' | 'business' | 'support';
   supportScope?: string[];
+  iat?: number; // JWT standard claim: issued-at (Unix seconds)
+  exp?: number; // JWT standard claim: expiry (Unix seconds)
 };

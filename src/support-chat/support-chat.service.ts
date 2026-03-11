@@ -99,23 +99,34 @@ type ManualEntry = {
   module: string;
   locale: ManualLocale;
   title: string;
-  purpose: string;
-  audience: string[];
-  prerequisites: { check: string }[];
-  workflow: { step: string; expected_result?: string; if_blocked?: string }[];
-  common_errors: {
+  related_pages: { id: string; route: string; reason: string; order: string }[];
+
+  // v2 fields
+  overview?: string;
+  before_you_start?: { text: string; link?: string }[];
+  common_tasks?: { task: string; steps: string[] }[];
+  warnings?: string[];
+  elements?: { name: string; type: string; description: string; notes?: string }[];
+
+  // v1 legacy fields
+  purpose?: string;
+  audience?: string[];
+  prerequisites?: { check: string }[];
+  workflow?: { step: string; expected_result?: string; if_blocked?: string }[];
+  common_errors?: {
     error_code: string;
     error_symptom: string;
     likely_cause: string;
     fix_steps: string[];
     related_route?: string;
   }[];
-  related_pages: { id: string; route: string; reason: string; order: string }[];
 };
 
 type ManualDataset = {
   entries: ManualEntry[];
 };
+
+type ManualSection = 'purpose' | 'prerequisites' | 'workflow' | 'errors' | 'links' | 'warnings' | 'elements';
 
 type RetrievalChunk = {
   chunk_id: string;
@@ -123,7 +134,7 @@ type RetrievalChunk = {
   route: string;
   module: string;
   locale: ManualLocale;
-  section: 'purpose' | 'prerequisites' | 'workflow' | 'errors' | 'links';
+  section: ManualSection;
   source: string;
   title: string;
   error_codes: string[];
@@ -137,7 +148,7 @@ type RetrievalResult = {
   route: string;
   module: string;
   locale: ManualLocale;
-  section: 'purpose' | 'prerequisites' | 'workflow' | 'errors' | 'links';
+  section: ManualSection;
   title: string;
   source: string;
   error_codes: string[];
@@ -240,7 +251,7 @@ export class SupportChatService {
         ? retrieval.retrieval_mode
         : 'none';
 
-    const response = this.supportChatComposerService.compose({
+    const response = await this.supportChatComposerService.compose({
       question,
       locale,
       intent,
@@ -263,6 +274,11 @@ export class SupportChatService {
         },
       }),
       escalationContact,
+      openaiClient: this.getOpenAiClient(),
+      llmModel:
+        this.config.get<string>('supportChat.llmModel') ??
+        process.env.SUPPORT_CHAT_LLM_MODEL ??
+        'gpt-4o-mini',
     });
 
     return {
@@ -605,7 +621,10 @@ export class SupportChatService {
       return input.results;
     }
     const explainPreferred = input.results.filter(
-      (item) => item.section === 'purpose' || item.section === 'workflow',
+      (item) =>
+        item.section === 'purpose' ||
+        item.section === 'workflow' ||
+        item.section === 'warnings',
     );
     if (explainPreferred.length) {
       return explainPreferred.slice(0, input.topK);
@@ -884,6 +903,7 @@ export class SupportChatService {
   }
 
   private buildChunksFromEntry(entry: ManualEntry, source: string): RetrievalChunk[] {
+    const errorCodes = (entry.common_errors ?? []).map((item) => item.error_code);
     const base = {
       id: entry.id,
       route: entry.route,
@@ -891,55 +911,88 @@ export class SupportChatService {
       locale: entry.locale,
       source,
       title: entry.title,
-      error_codes: entry.common_errors.map((item) => item.error_code),
+      error_codes: errorCodes,
     };
 
-    const chunks: RetrievalChunk[] = [
-      {
-        ...base,
-        chunk_id: `${entry.id}:${entry.locale}:purpose`,
-        section: 'purpose',
-        text: `${entry.title}. ${entry.purpose} Audience: ${entry.audience.join(', ')}`,
-      },
-    ];
+    const chunks: RetrievalChunk[] = [];
 
-    if (entry.prerequisites.length) {
+    // Purpose / Overview — prefer v2 overview, fall back to v1 purpose
+    const purposeText = entry.overview
+      ? `${entry.title}. ${entry.overview}`
+      : entry.purpose
+        ? `${entry.title}. ${entry.purpose}${entry.audience?.length ? ` Audience: ${entry.audience.join(', ')}` : ''}`
+        : `${entry.title}.`;
+    chunks.push({
+      ...base,
+      chunk_id: `${entry.id}:${entry.locale}:purpose`,
+      section: 'purpose',
+      text: purposeText,
+    });
+
+    // Prerequisites / Before you start — prefer v2, fall back to v1
+    const prereqItems = entry.before_you_start?.length
+      ? entry.before_you_start.map((item) => item.text)
+      : (entry.prerequisites ?? []).map((item) => item.check);
+    if (prereqItems.length) {
       chunks.push({
         ...base,
         chunk_id: `${entry.id}:${entry.locale}:prerequisites`,
         section: 'prerequisites',
-        text: entry.prerequisites.map((item) => item.check).join(' | '),
+        text: prereqItems.join(' | '),
       });
     }
 
-    if (entry.workflow.length) {
+    // Workflow / Common tasks — prefer v2, fall back to v1
+    const workflowItems = entry.common_tasks?.length
+      ? entry.common_tasks.map((task) => `${task.task}: ${task.steps.join(' ')}`)
+      : (entry.workflow ?? []).map((step) =>
+          [step.step, step.expected_result ?? '', step.if_blocked ?? '']
+            .filter(Boolean)
+            .join(' '),
+        );
+    if (workflowItems.length) {
       chunks.push({
         ...base,
         chunk_id: `${entry.id}:${entry.locale}:workflow`,
         section: 'workflow',
-        text: entry.workflow
-          .map((step) =>
-            [step.step, step.expected_result ?? '', step.if_blocked ?? '']
-              .filter(Boolean)
-              .join(' '),
+        text: workflowItems.join(' | '),
+      });
+    }
+
+    // Warnings (v2 only)
+    if (entry.warnings?.length) {
+      chunks.push({
+        ...base,
+        chunk_id: `${entry.id}:${entry.locale}:warnings`,
+        section: 'warnings',
+        text: entry.warnings.join(' | '),
+      });
+    }
+
+    // Elements (v2 only)
+    if (entry.elements?.length) {
+      chunks.push({
+        ...base,
+        chunk_id: `${entry.id}:${entry.locale}:elements`,
+        section: 'elements',
+        text: entry.elements
+          .map((el) =>
+            `${el.name} (${el.type}): ${el.description}${el.notes ? ` ${el.notes}` : ''}`,
           )
           .join(' | '),
       });
     }
 
-    if (entry.common_errors.length) {
+    // Errors (v1 legacy)
+    const errors = entry.common_errors ?? [];
+    if (errors.length) {
       chunks.push({
         ...base,
         chunk_id: `${entry.id}:${entry.locale}:errors`,
         section: 'errors',
-        text: entry.common_errors
+        text: errors
           .map((error) =>
-            [
-              error.error_code,
-              error.error_symptom,
-              error.likely_cause,
-              error.fix_steps.join(' '),
-            ]
+            [error.error_code, error.error_symptom, error.likely_cause, error.fix_steps.join(' ')]
               .filter(Boolean)
               .join(' '),
           )
@@ -947,12 +1000,13 @@ export class SupportChatService {
       });
     }
 
-    if (entry.related_pages.length) {
+    // Related pages
+    if ((entry.related_pages ?? []).length) {
       chunks.push({
         ...base,
         chunk_id: `${entry.id}:${entry.locale}:links`,
         section: 'links',
-        text: entry.related_pages
+        text: (entry.related_pages ?? [])
           .map((item) => `${item.order} ${item.route} ${item.reason}`)
           .join(' | '),
       });
@@ -988,7 +1042,7 @@ export class SupportChatService {
         score += 2;
       }
     }
-    if (chunk.section === 'errors') {
+    if (chunk.section === 'errors' || chunk.section === 'warnings') {
       score += 0.4;
     }
     return score;

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -230,9 +231,7 @@ export class PlatformService {
       return;
     }
     if (!BUSINESS_STATUS_TRANSITIONS[from].has(to)) {
-      throw new BadRequestException(
-        `Invalid business status transition: ${from} -> ${to}.`,
-      );
+      throw new BadRequestException('Invalid business status transition.');
     }
   }
 
@@ -244,9 +243,7 @@ export class PlatformService {
       return;
     }
     if (!INCIDENT_STATUS_TRANSITIONS[from].has(to)) {
-      throw new BadRequestException(
-        `Invalid incident transition: ${from} -> ${to}.`,
-      );
+      throw new BadRequestException('Invalid incident status transition.');
     }
   }
 
@@ -330,13 +327,16 @@ export class PlatformService {
     ownerEmail: string;
     ownerTempPassword: string;
     tier?: SubscriptionTier;
+    actorId?: string;
   }) {
+    const actorId = data.actorId ?? 'platform';
     const { business, roles } = await this.businessService.createBusiness({
       name: data.businessName,
       tier: data.tier,
+      actorId,
     });
 
-    const owner = await this.usersService.create(business.id, {
+    const owner = await this.usersService.create(business.id, actorId, {
       name: data.ownerName,
       email: data.ownerEmail,
       status: 'PENDING',
@@ -349,12 +349,9 @@ export class PlatformService {
       await this.usersService.assignRole(owner.id, systemOwnerRoleId);
     }
 
-    const verification = await this.authService.requestEmailVerification(
-      owner.id,
-      business.id,
-    );
+    await this.authService.requestEmailVerification(owner.id, business.id);
 
-    return { business, owner, verificationToken: verification?.token };
+    return { business, owner };
   }
 
   listBusinesses(
@@ -442,6 +439,11 @@ export class PlatformService {
       deviceId?: string;
     } = {},
   ) {
+    // P4-SW1-M9: Validate that the action filter, if present, contains only safe characters.
+    // Audit log actions are uppercase snake_case strings (e.g. AUTH_LOGIN, SALE_COMPLETE).
+    if (query.action && !/^[A-Z0-9_]+$/.test(query.action)) {
+      throw new BadRequestException('Invalid action filter value.');
+    }
     const pagination = parsePagination(query, 50, 200);
     return this.prisma.auditLog
       .findMany({
@@ -1203,27 +1205,33 @@ export class PlatformService {
       throw new BadRequestException('Business not found.');
     }
     this.assertValidBusinessTransition(before.status, status);
-    const updated = await this.prisma.business.update({
-      where: { id: businessId },
-      data: { status },
-    });
     const archivedStatuses = new Set<BusinessStatus>([
       BusinessStatus.ARCHIVED,
       BusinessStatus.DELETED,
     ]);
-    if (archivedStatuses.has(status)) {
-      const userIds = await this.prisma.businessUser
-        .findMany({
-          where: { businessId },
-          select: { userId: true },
-        })
-        .then((rows) => rows.map((row) => row.userId));
-      if (userIds.length) {
-        await this.prisma.refreshToken.updateMany({
-          where: { userId: { in: userIds }, revokedAt: null },
-          data: { revokedAt: new Date() },
+    const { updated, revokedUserCount } = await this.prisma.$transaction(
+      async (tx) => {
+        const business = await tx.business.update({
+          where: { id: businessId },
+          data: { status },
         });
-      }
+        let revokedCount = 0;
+        if (archivedStatuses.has(status)) {
+          const userIds = await tx.businessUser
+            .findMany({ where: { businessId }, select: { userId: true } })
+            .then((rows) => rows.map((row) => row.userId));
+          if (userIds.length) {
+            await tx.refreshToken.updateMany({
+              where: { userId: { in: userIds }, revokedAt: null },
+              data: { revokedAt: new Date() },
+            });
+            revokedCount = userIds.length;
+          }
+        }
+        return { updated: business, revokedUserCount: revokedCount };
+      },
+    );
+    if (archivedStatuses.has(status) && revokedUserCount > 0) {
       await this.logPlatformAction({
         platformAdminId,
         action: 'BUSINESS_FORCE_LOGOUT',
@@ -1231,7 +1239,7 @@ export class PlatformService {
         resourceId: businessId,
         businessId,
         reason: 'Business deleted',
-        metadata: { revokedUsers: userIds.length },
+        metadata: { revokedUsers: revokedUserCount },
       });
     }
     await this.auditService.logEvent({
@@ -1523,14 +1531,14 @@ export class PlatformService {
       await tx.branch.deleteMany({ where: { businessId } });
       await tx.priceList.deleteMany({ where: { businessId } });
       await tx.business.delete({ where: { id: businessId } });
-    });
 
-    if (userIdList.length) {
-      await this.prisma.refreshToken.updateMany({
-        where: { userId: { in: userIdList }, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-    }
+      if (userIdList.length) {
+        await tx.refreshToken.updateMany({
+          where: { userId: { in: userIdList }, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
+    });
 
     await this.logPlatformAction({
       platformAdminId,
@@ -2796,6 +2804,18 @@ export class PlatformService {
         })
       : { count: 0 };
 
+    // Stamp the business so that JwtStrategy rejects any access tokens issued
+    // before this moment, closing the ~15-min window where JWTs stay valid.
+    await this.prisma.business.update({
+      where: { id: data.businessId },
+      data: { forceLogoutAt: revokedAt },
+    });
+
+    // Push a force-logout SSE event so open browser tabs close immediately.
+    if (userIds.length) {
+      this.notificationStream.emitForceLogout(userIds);
+    }
+
     await this.logPlatformAction({
       platformAdminId: data.platformAdminId,
       action: 'BUSINESS_FORCE_LOGOUT',
@@ -2977,10 +2997,10 @@ export class PlatformService {
     };
   }
 
-  async getPurgePreflight(businessId: string, reason?: string) {
+  async getPurgePreflight(businessId: string, platformAdminId: string, reason?: string) {
     return this.purgeBusiness(
       businessId,
-      'platform-preflight',
+      platformAdminId,
       reason ?? 'Purge preflight',
       businessId,
       'DELETE',
@@ -3067,11 +3087,18 @@ export class PlatformService {
     const statusTargets = Array.from(
       new Set((data.targetStatuses ?? []).filter(Boolean)),
     );
+    const VALID_SEVERITIES = new Set(['INFO', 'WARNING', 'SECURITY']);
+    if (!VALID_SEVERITIES.has(data.severity)) {
+      throw new BadRequestException('Invalid severity. Must be INFO, WARNING, or SECURITY.');
+    }
     const startsAt = data.startsAt ?? new Date();
     const endsAt =
       data.endsAt === undefined
         ? new Date(startsAt.getTime() + 24 * 60 * 60 * 1000)
         : data.endsAt;
+    if (endsAt !== null && endsAt <= startsAt) {
+      throw new BadRequestException('End date must be after start date.');
+    }
     const announcement = await this.prisma.platformAnnouncement.create({
       data: {
         title: data.title,
@@ -3143,23 +3170,6 @@ export class PlatformService {
     const statusTargets = Array.from(
       new Set((data.targetStatuses ?? []).filter(Boolean)),
     );
-    const explicitBusinesses = businessTargets.length
-      ? await this.prisma.business.findMany({
-          where: { id: { in: businessTargets } },
-          select: {
-            id: true,
-            name: true,
-            status: true,
-            subscription: {
-              select: {
-                tier: true,
-                status: true,
-              },
-            },
-          },
-        })
-      : [];
-
     const subscriptionFilter: Prisma.SubscriptionWhereInput = {};
     if (tierTargets.length) {
       subscriptionFilter.tier = { in: tierTargets as SubscriptionTier[] };
@@ -3170,41 +3180,51 @@ export class PlatformService {
       };
     }
     const hasSegmentFilter = Boolean(tierTargets.length || statusTargets.length);
-    const segmentBusinesses = hasSegmentFilter
-      ? await this.prisma.business.findMany({
-          where: {
-            subscription: {
-              is: subscriptionFilter,
-            },
-          },
-          select: {
-            id: true,
-            name: true,
-            status: true,
-            subscription: {
-              select: {
-                tier: true,
-                status: true,
-              },
-            },
-          },
-        })
-      : businessTargets.length
-        ? []
-        : await this.prisma.business.findMany({
-            select: {
-              id: true,
-              name: true,
-              status: true,
-              subscription: {
-                select: {
-                  tier: true,
-                  status: true,
-                },
-              },
-            },
-          });
+    const isBroadcast = !businessTargets.length && !hasSegmentFilter;
 
+    const businessSelect = {
+      id: true,
+      name: true,
+      status: true,
+      subscription: { select: { tier: true, status: true } },
+    };
+
+    // Explicit businesses are bounded by the provided IDs — fetch all.
+    const explicitBusinesses = businessTargets.length
+      ? await this.prisma.business.findMany({
+          where: { id: { in: businessTargets } },
+          select: businessSelect,
+        })
+      : [];
+
+    // For segment / broadcast queries, use count() for accurate totals and a
+    // limited findMany() for sample rows to avoid loading the entire table.
+    let segmentCount = 0;
+    let segmentSample: typeof explicitBusinesses = [];
+
+    if (hasSegmentFilter) {
+      const segmentWhere = { subscription: { is: subscriptionFilter } };
+      [segmentCount, segmentSample] = await Promise.all([
+        this.prisma.business.count({ where: segmentWhere }),
+        this.prisma.business.findMany({
+          where: segmentWhere,
+          select: businessSelect,
+          take: 20,
+          orderBy: { name: 'asc' },
+        }),
+      ]);
+    } else if (isBroadcast) {
+      [segmentCount, segmentSample] = await Promise.all([
+        this.prisma.business.count(),
+        this.prisma.business.findMany({
+          select: businessSelect,
+          take: 20,
+          orderBy: { name: 'asc' },
+        }),
+      ]);
+    }
+
+    // Merge explicit + segment samples (explicit IDs take priority for dedup).
     const combinedMap = new Map<
       string,
       {
@@ -3220,7 +3240,7 @@ export class PlatformService {
     explicitBusinesses.forEach((business) => {
       combinedMap.set(business.id, business);
     });
-    segmentBusinesses.forEach((business) => {
+    segmentSample.forEach((business) => {
       combinedMap.set(business.id, business);
     });
 
@@ -3235,14 +3255,37 @@ export class PlatformService {
         subscriptionStatus: business.subscription?.status ?? null,
       }));
 
+    // Compute accurate union total:
+    // - broadcast:  all businesses (= segmentCount)
+    // - explicit only: count of matched explicit IDs
+    // - segment only: count from segment query
+    // - both:  union count via OR to avoid double-counting
+    let total: number;
+    if (isBroadcast) {
+      total = segmentCount;
+    } else if (businessTargets.length && !hasSegmentFilter) {
+      total = explicitBusinesses.length;
+    } else if (!businessTargets.length && hasSegmentFilter) {
+      total = segmentCount;
+    } else {
+      total = await this.prisma.business.count({
+        where: {
+          OR: [
+            { id: { in: businessTargets } },
+            { subscription: { is: subscriptionFilter } },
+          ],
+        },
+      });
+    }
+
     return {
       estimatedReach: {
-        total: combinedMap.size,
+        total,
         explicit: explicitBusinesses.length,
-        segment: segmentBusinesses.length,
+        segment: segmentCount,
       },
       filters: {
-        hasBroadcastScope: !businessTargets.length && !hasSegmentFilter,
+        hasBroadcastScope: isBroadcast,
         targetBusinessIds: businessTargets,
         targetTiers: tierTargets,
         targetStatuses: statusTargets,
@@ -3266,7 +3309,13 @@ export class PlatformService {
     announcementId: string;
     platformAdminId: string;
   }) {
-    const announcement = await this.prisma.platformAnnouncement.update({
+    const announcement = await this.prisma.platformAnnouncement.findUnique({
+      where: { id: data.announcementId },
+    });
+    if (!announcement) {
+      throw new NotFoundException('Announcement not found.');
+    }
+    const updated = await this.prisma.platformAnnouncement.update({
       where: { id: data.announcementId },
       data: { endsAt: new Date() },
     });
@@ -3274,14 +3323,14 @@ export class PlatformService {
       platformAdminId: data.platformAdminId,
       action: 'PLATFORM_ANNOUNCEMENT_END',
       resourceType: 'PlatformAnnouncement',
-      resourceId: announcement.id,
-      metadata: { endsAt: announcement.endsAt },
+      resourceId: updated.id,
+      metadata: { endsAt: updated.endsAt },
     });
     this.notificationStream.emitAnnouncementChanged({
-      id: announcement.id,
+      id: updated.id,
       action: 'ended',
     });
-    return announcement;
+    return updated;
   }
 
   async changePlatformAdminPassword(params: {
@@ -3509,19 +3558,18 @@ export class PlatformService {
       take: 5,
     });
 
-    const storageTotals = await Promise.all(
-      storageUsage.map(async (row) => {
-        const business = await this.prisma.business.findUnique({
-          where: { id: row.businessId },
-          select: { name: true },
-        });
-        return {
-          businessId: row.businessId,
-          name: business?.name ?? row.businessId,
-          sizeMb: Number(row._sum.sizeMb ?? 0),
-        };
-      }),
-    );
+    // P4-SW1-M12: Replaced N+1 query pattern with a single batched findMany lookup.
+    const storageBusinessIds = storageUsage.map((row) => row.businessId);
+    const storageBusinesses = await this.prisma.business.findMany({
+      where: { id: { in: storageBusinessIds } },
+      select: { id: true, name: true },
+    });
+    const storageBusinessMap = new Map(storageBusinesses.map((b) => [b.id, b.name]));
+    const storageTotals = storageUsage.map((row) => ({
+      businessId: row.businessId,
+      name: storageBusinessMap.get(row.businessId) ?? row.businessId,
+      sizeMb: Number(row._sum.sizeMb ?? 0),
+    }));
 
     const totalStorage = storageTotals.reduce(
       (sum, row) => sum + (row.sizeMb ?? 0),

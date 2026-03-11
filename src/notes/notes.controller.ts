@@ -11,6 +11,7 @@ import {
 import { NotesService } from './notes.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller()
 export class NotesController {
@@ -44,9 +45,9 @@ export class NotesController {
   ) {
     const permissions = new Set(req.user?.permissions ?? []);
     return this.notesService.listNotes(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       {
-        userId: req.user?.sub || '',
+        userId: requireUserId(req),
         canManage: permissions.has(PermissionsList.NOTES_MANAGE),
         branchScope: req.user?.branchScope ?? [],
       },
@@ -63,7 +64,7 @@ export class NotesController {
     @Query('query') query?: string,
   ) {
     return this.notesService.listLinkables(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       type ?? '',
       query ?? '',
       req.user?.branchScope ?? [],
@@ -73,7 +74,7 @@ export class NotesController {
   @Get('notes/meta')
   @Permissions(PermissionsList.NOTES_READ)
   meta(@Req() req: { user?: { businessId: string } }) {
-    return this.notesService.getMeta(req.user?.businessId || '');
+    return this.notesService.getMeta(requireBusinessId(req));
   }
 
   @Get('notes/reminders/overview')
@@ -92,9 +93,9 @@ export class NotesController {
   ) {
     const permissions = new Set(req.user?.permissions ?? []);
     return this.notesService.listReminderOverview(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       {
-        userId: req.user?.sub || '',
+        userId: requireUserId(req),
         canManage: permissions.has(PermissionsList.NOTES_MANAGE),
         branchScope: req.user?.branchScope ?? [],
       },
@@ -117,8 +118,8 @@ export class NotesController {
     @Param('id') id: string,
   ) {
     const permissions = new Set(req.user?.permissions ?? []);
-    return this.notesService.getNote(req.user?.businessId || '', id, {
-      userId: req.user?.sub || '',
+    return this.notesService.getNote(requireBusinessId(req), id, {
+      userId: requireUserId(req),
       canManage: permissions.has(PermissionsList.NOTES_MANAGE),
       branchScope: req.user?.branchScope ?? [],
     });
@@ -148,11 +149,11 @@ export class NotesController {
   ) {
     const permissions = new Set(req.user?.permissions ?? []);
     return this.notesService.createNote(
-      req.user?.businessId || '',
-      req.user?.sub || '',
+      requireBusinessId(req),
+      requireUserId(req),
       body,
       {
-        userId: req.user?.sub || '',
+        userId: requireUserId(req),
         canManage: permissions.has(PermissionsList.NOTES_MANAGE),
         branchScope: req.user?.branchScope ?? [],
       },
@@ -185,12 +186,12 @@ export class NotesController {
   ) {
     const permissions = new Set(req.user?.permissions ?? []);
     return this.notesService.updateNote(
-      req.user?.businessId || '',
-      req.user?.sub || '',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
       body,
       {
-        userId: req.user?.sub || '',
+        userId: requireUserId(req),
         canManage: permissions.has(PermissionsList.NOTES_MANAGE),
         branchScope: req.user?.branchScope ?? [],
       },
@@ -213,11 +214,11 @@ export class NotesController {
   ) {
     const permissions = new Set(req.user?.permissions ?? []);
     return this.notesService.archiveNote(
-      req.user?.businessId || '',
-      req.user?.sub || '',
+      requireBusinessId(req),
+      requireUserId(req),
       id,
       {
-        userId: req.user?.sub || '',
+        userId: requireUserId(req),
         canManage: permissions.has(PermissionsList.NOTES_MANAGE),
         branchScope: req.user?.branchScope ?? [],
       },
@@ -239,8 +240,8 @@ export class NotesController {
     @Param('id') id: string,
   ) {
     const permissions = new Set(req.user?.permissions ?? []);
-    return this.notesService.listReminders(req.user?.businessId || '', id, {
-      userId: req.user?.sub || '',
+    return this.notesService.listReminders(requireBusinessId(req), id, {
+      userId: requireUserId(req),
       canManage: permissions.has(PermissionsList.NOTES_MANAGE),
       branchScope: req.user?.branchScope ?? [],
     });
@@ -261,9 +262,9 @@ export class NotesController {
     },
   ) {
     return this.notesService.createReminders(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || '',
+      requireUserId(req),
       body,
     );
   }
@@ -276,9 +277,9 @@ export class NotesController {
     @Param('id') id: string,
   ) {
     return this.notesService.cancelReminder(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       id,
-      req.user?.sub || '',
+      requireUserId(req),
     );
   }
 }

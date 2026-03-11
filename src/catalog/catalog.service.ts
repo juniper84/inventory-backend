@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SubscriptionService } from '../subscription/subscription.service';
@@ -45,6 +46,7 @@ export class CatalogService {
 
   async createCategory(
     businessId: string,
+    userId: string,
     data: { name: string; parentId?: string },
   ) {
     if (data.parentId) {
@@ -64,7 +66,7 @@ export class CatalogService {
     });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'CATEGORY_CREATE',
       resourceType: 'Category',
       resourceId: result.id,
@@ -77,6 +79,7 @@ export class CatalogService {
   async updateCategory(
     businessId: string,
     categoryId: string,
+    userId: string,
     data: { name?: string; parentId?: string },
   ) {
     const before = await this.prisma.category.findFirst({
@@ -85,13 +88,41 @@ export class CatalogService {
     if (!before) {
       return null;
     }
-    const result = await this.prisma.category.update({
-      where: { id: categoryId },
+    // Guard against circular parent references: walk up from the candidate
+    // parent and ensure we never reach categoryId.
+    if (data.parentId) {
+      if (data.parentId === categoryId) {
+        throw new BadRequestException('A category cannot be its own parent.');
+      }
+      let cursor: string | null = data.parentId;
+      const seen = new Set<string>();
+      while (cursor) {
+        if (seen.has(cursor)) break; // cycle in existing data — stop walking
+        seen.add(cursor);
+        // eslint-disable-next-line no-await-in-loop
+        const ancestor = await this.prisma.category.findFirst({
+          where: { id: cursor, businessId },
+          select: { id: true, parentId: true },
+        });
+        if (!ancestor) break;
+        if (ancestor.parentId === categoryId) {
+          throw new BadRequestException(
+            'Setting this parent would create a circular reference.',
+          );
+        }
+        cursor = ancestor.parentId;
+      }
+    }
+    await this.prisma.category.updateMany({
+      where: { id: categoryId, businessId },
       data,
+    });
+    const result = await this.prisma.category.findFirst({
+      where: { id: categoryId, businessId },
     });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'CATEGORY_UPDATE',
       resourceType: 'Category',
       resourceId: categoryId,
@@ -163,6 +194,7 @@ export class CatalogService {
 
   async createProduct(
     businessId: string,
+    userId: string,
     data: { name: string; description?: string; categoryId: string },
   ) {
     const category = await this.prisma.category.findFirst({
@@ -171,18 +203,20 @@ export class CatalogService {
     if (!category) {
       return null;
     }
-    await this.subscriptionService.assertLimit(businessId, 'products');
-    const result = await this.prisma.product.create({
-      data: {
-        businessId,
-        name: data.name,
-        description: data.description,
-        categoryId: data.categoryId,
-      },
+    const result = await this.prisma.$transaction(async (tx) => {
+      await this.subscriptionService.assertLimit(businessId, 'products', 1, tx);
+      return tx.product.create({
+        data: {
+          businessId,
+          name: data.name,
+          description: data.description,
+          categoryId: data.categoryId,
+        },
+      });
     });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'PRODUCT_CREATE',
       resourceType: 'Product',
       resourceId: result.id,
@@ -195,6 +229,7 @@ export class CatalogService {
   async updateProduct(
     businessId: string,
     productId: string,
+    userId: string,
     data: {
       name?: string;
       description?: string;
@@ -208,8 +243,13 @@ export class CatalogService {
     if (!before) {
       return null;
     }
-    const result = await this.prisma.product.update({
-      where: { id: productId },
+    if (before.status === 'ARCHIVED' && data.status && data.status !== 'ARCHIVED') {
+      throw new BadRequestException(
+        'Archived products cannot be reactivated. Create a new product instead.',
+      );
+    }
+    await this.prisma.product.updateMany({
+      where: { id: productId, businessId },
       data: {
         name: data.name,
         description: data.description,
@@ -217,9 +257,12 @@ export class CatalogService {
         status: data.status as any,
       },
     });
+    const result = await this.prisma.product.findFirst({
+      where: { id: productId, businessId },
+    });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'PRODUCT_UPDATE',
       resourceType: 'Product',
       resourceId: productId,
@@ -238,11 +281,23 @@ export class CatalogService {
       status?: string;
       productId?: string;
       branchId?: string;
+      hasStockBranchId?: string;
       availability?: string;
       includeTotal?: string;
     },
   ) {
     const pagination = parsePagination(query);
+
+    if (query.branchId) {
+      const branch = await this.prisma.branch.findFirst({
+        where: { id: query.branchId, businessId },
+        select: { id: true },
+      });
+      if (!branch) {
+        throw new BadRequestException('Branch not found.');
+      }
+    }
+
     const search = query.search?.trim();
     const availability = query.availability?.toUpperCase();
     const availabilityActive =
@@ -317,8 +372,41 @@ export class CatalogService {
         ? this.prisma.variant.count({ where })
         : Promise.resolve(null),
     ]);
+
+    // When hasStockBranchId is provided, enrich each variant with hasStock (boolean).
+    // This tells the POS whether an item can be sold without exposing raw quantities.
+    // Uses a dedicated param so it does NOT interfere with the branchId availability filter.
+    let stockMap: Map<string, boolean> | null = null;
+    const stockBranchId = query.hasStockBranchId;
+    if (stockBranchId && items.length > 0) {
+      const snapshots = await this.prisma.stockSnapshot.findMany({
+        where: {
+          businessId,
+          branchId: stockBranchId,
+          variantId: { in: items.map((v) => v.id) },
+        },
+        select: { variantId: true, quantity: true },
+      });
+      stockMap = new Map(
+        snapshots.map((s) => [s.variantId, Number(s.quantity) > 0]),
+      );
+    }
+
+    const enriched = items.map((item) => ({
+      ...item,
+      ...(stockMap !== null
+        ? {
+            hasStock: stockMap.has(item.id)
+              ? stockMap.get(item.id)!          // snapshot exists: true (qty>0) or false (qty=0)
+              : item.trackStock
+                ? false                         // tracked but no snapshot = never stocked = out of stock
+                : null,                         // untracked = ignore stock entirely, always show
+          }
+        : {}),
+    }));
+
     return buildPaginatedResponse(
-      items,
+      enriched,
       pagination.take,
       typeof total === 'number' ? total : undefined,
     );
@@ -326,6 +414,7 @@ export class CatalogService {
 
   async createVariant(
     businessId: string,
+    userId: string,
     data: {
       productId: string;
       name: string;
@@ -367,6 +456,15 @@ export class CatalogService {
     } else {
       conversionFactor = 1;
     }
+    if (
+      data.minPrice !== undefined &&
+      data.defaultPrice !== undefined &&
+      data.minPrice > data.defaultPrice
+    ) {
+      throw new BadRequestException(
+        'Minimum price cannot be greater than the default price.',
+      );
+    }
     const result = await this.prisma.variant.create({
       data: {
         businessId,
@@ -387,7 +485,7 @@ export class CatalogService {
     });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'VARIANT_CREATE',
       resourceType: 'Variant',
       resourceId: result.id,
@@ -400,6 +498,7 @@ export class CatalogService {
   async updateVariant(
     businessId: string,
     variantId: string,
+    userId: string,
     data: {
       name?: string;
       sku?: string;
@@ -444,8 +543,16 @@ export class CatalogService {
     } else {
       conversionFactor = 1;
     }
-    const result = await this.prisma.variant.update({
-      where: { id: variantId },
+    const resolvedMinPrice = data.minPrice ?? Number(before.minPrice ?? 0);
+    const resolvedDefaultPrice =
+      data.defaultPrice ?? Number(before.defaultPrice ?? 0);
+    if (resolvedMinPrice > resolvedDefaultPrice) {
+      throw new BadRequestException(
+        'Minimum price cannot be greater than the default price.',
+      );
+    }
+    await this.prisma.variant.updateMany({
+      where: { id: variantId, businessId },
       data: {
         name: data.name,
         sku: data.sku,
@@ -461,9 +568,12 @@ export class CatalogService {
         imageUrl: data.imageUrl,
       },
     });
+    const result = await this.prisma.variant.findFirst({
+      where: { id: variantId, businessId },
+    });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'VARIANT_UPDATE',
       resourceType: 'Variant',
       resourceId: variantId,
@@ -475,14 +585,14 @@ export class CatalogService {
     return result;
   }
 
-  async generateBarcode(businessId: string, data: { variantId: string }) {
+  async generateBarcode(businessId: string, userId: string, data: { variantId: string }) {
     const variant = await this.prisma.variant.findFirst({
       where: { id: data.variantId, businessId },
     });
     if (!variant) {
       return null;
     }
-    const code = `NV-${Date.now()}`;
+    const code = `NV-${randomBytes(8).toString('hex')}`;
     const result = await this.prisma.barcode.create({
       data: {
         businessId,
@@ -492,7 +602,7 @@ export class CatalogService {
     });
     this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'BARCODE_GENERATE',
       resourceType: 'Barcode',
       resourceId: result.id,
@@ -522,6 +632,7 @@ export class CatalogService {
 
   async createBarcode(
     businessId: string,
+    userId: string,
     data: { variantId: string; code: string },
   ) {
     const variant = await this.prisma.variant.findFirst({
@@ -529,6 +640,14 @@ export class CatalogService {
     });
     if (!variant) {
       return null;
+    }
+    const existing = await this.prisma.barcode.findFirst({
+      where: { businessId, code: data.code },
+    });
+    if (existing) {
+      throw new BadRequestException(
+        'Barcode is already assigned to another variant.',
+      );
     }
     const result = await this.prisma.barcode.create({
       data: {
@@ -539,7 +658,7 @@ export class CatalogService {
     });
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'BARCODE_CREATE',
       resourceType: 'Barcode',
       resourceId: result.id,
@@ -588,18 +707,19 @@ export class CatalogService {
       return { approvalRequired: true, approvalId: approval.approval?.id };
     }
 
-    await this.prisma.barcode.update({
-      where: { id: barcode.id },
-      data: { isActive: false },
-    });
-
-    const replacement = await this.prisma.barcode.create({
-      data: {
-        businessId,
-        variantId: data.newVariantId,
-        code: barcode.code,
-        isActive: true,
-      },
+    const replacement = await this.prisma.$transaction(async (tx) => {
+      await tx.barcode.updateMany({
+        where: { id: barcode.id, businessId },
+        data: { isActive: false },
+      });
+      return tx.barcode.create({
+        data: {
+          businessId,
+          variantId: data.newVariantId,
+          code: barcode.code,
+          isActive: true,
+        },
+      });
     });
 
     await this.auditService.logEvent({
@@ -646,9 +766,12 @@ export class CatalogService {
       return { approvalRequired: true, approvalId: approval.approval?.id };
     }
 
-    const updated = await this.prisma.variant.update({
-      where: { id: data.variantId },
+    await this.prisma.variant.updateMany({
+      where: { id: data.variantId, businessId },
       data: { sku: data.sku },
+    });
+    const updated = await this.prisma.variant.findFirst({
+      where: { id: data.variantId, businessId },
     });
 
     await this.auditService.logEvent({
@@ -666,6 +789,7 @@ export class CatalogService {
 
   async updateVariantAvailability(
     businessId: string,
+    userId: string,
     data: { variantId: string; branchId: string; isActive: boolean },
   ) {
     const [variant, branch] = await Promise.all([
@@ -699,7 +823,7 @@ export class CatalogService {
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'VARIANT_AVAILABILITY_UPDATE',
       resourceType: 'Variant',
       resourceId: data.variantId,
@@ -783,27 +907,28 @@ export class CatalogService {
       );
     }
 
-    if (data.isPrimary) {
-      await this.prisma.productImage.updateMany({
-        where: {
+    const image = await this.prisma.$transaction(async (tx) => {
+      if (data.isPrimary) {
+        await tx.productImage.updateMany({
+          where: {
+            businessId,
+            productId: data.productId,
+            isPrimary: true,
+          },
+          data: { isPrimary: false },
+        });
+      }
+      return tx.productImage.create({
+        data: {
           businessId,
           productId: data.productId,
-          isPrimary: true,
+          url: data.url,
+          filename: data.filename,
+          mimeType: data.mimeType,
+          sizeMb: data.sizeMb ? new Prisma.Decimal(data.sizeMb) : null,
+          isPrimary: data.isPrimary ?? false,
         },
-        data: { isPrimary: false },
       });
-    }
-
-    const image = await this.prisma.productImage.create({
-      data: {
-        businessId,
-        productId: data.productId,
-        url: data.url,
-        filename: data.filename,
-        mimeType: data.mimeType,
-        sizeMb: data.sizeMb ? new Prisma.Decimal(data.sizeMb) : null,
-        isPrimary: data.isPrimary ?? false,
-      },
     });
 
     await this.auditService.logEvent({
@@ -823,6 +948,7 @@ export class CatalogService {
     businessId: string,
     productId: string,
     imageId: string,
+    userId: string,
   ) {
     const image = await this.prisma.productImage.findFirst({
       where: { id: imageId, businessId, productId },
@@ -831,19 +957,23 @@ export class CatalogService {
       return null;
     }
 
-    await this.prisma.productImage.updateMany({
-      where: { businessId, productId, isPrimary: true },
-      data: { isPrimary: false },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.productImage.updateMany({
+        where: { businessId, productId, isPrimary: true },
+        data: { isPrimary: false },
+      });
+      await tx.productImage.updateMany({
+        where: { id: imageId, businessId },
+        data: { isPrimary: true },
+      });
     });
-
-    const updated = await this.prisma.productImage.update({
-      where: { id: imageId },
-      data: { isPrimary: true },
+    const updated = await this.prisma.productImage.findFirst({
+      where: { id: imageId, businessId },
     });
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'PRODUCT_IMAGE_PRIMARY',
       resourceType: 'ProductImage',
       resourceId: imageId,
@@ -857,6 +987,7 @@ export class CatalogService {
     businessId: string,
     productId: string,
     imageId: string,
+    userId: string,
   ) {
     const image = await this.prisma.productImage.findFirst({
       where: { id: imageId, businessId, productId },
@@ -865,14 +996,17 @@ export class CatalogService {
       return null;
     }
 
-    const updated = await this.prisma.productImage.update({
-      where: { id: imageId },
+    await this.prisma.productImage.updateMany({
+      where: { id: imageId, businessId },
       data: { status: 'REMOVED' },
+    });
+    const updated = await this.prisma.productImage.findFirst({
+      where: { id: imageId, businessId },
     });
 
     await this.auditService.logEvent({
       businessId,
-      userId: 'system',
+      userId,
       action: 'PRODUCT_IMAGE_REMOVE',
       resourceType: 'ProductImage',
       resourceId: imageId,
@@ -928,9 +1062,12 @@ export class CatalogService {
     if (!variant) {
       return null;
     }
-    const updated = await this.prisma.variant.update({
-      where: { id: data.variantId },
+    await this.prisma.variant.updateMany({
+      where: { id: data.variantId, businessId },
       data: { imageUrl: data.imageUrl },
+    });
+    const updated = await this.prisma.variant.findFirst({
+      where: { id: data.variantId, businessId },
     });
     await this.auditService.logEvent({
       businessId,

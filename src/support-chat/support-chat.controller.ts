@@ -1,9 +1,14 @@
-import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { Permissions } from '../rbac/permissions.decorator';
+import { PermissionsList } from '../rbac/permissions';
 import { SupportChatService } from './support-chat.service';
 import { SupportChatContextService } from './support-chat-context.service';
 import { SupportChatPlaybookService } from './support-chat-playbook.service';
 
 @Controller('support/chat')
+@UseGuards(JwtAuthGuard)
 export class SupportChatController {
   constructor(
     private readonly supportChatService: SupportChatService,
@@ -12,7 +17,9 @@ export class SupportChatController {
   ) {}
 
   @Post()
-  chat(
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Permissions(PermissionsList.SUPPORT_CHAT_USE)
+  async chat(
     @Req()
     req: {
       user?: {
@@ -58,7 +65,7 @@ export class SupportChatController {
       };
     },
   ) {
-    return this.supportChatService.chat({
+    return await this.supportChatService.chat({
       user: req.user as any,
       question: body.question,
       locale: body.locale,
@@ -75,6 +82,8 @@ export class SupportChatController {
   }
 
   @Get('retrieve')
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  @Permissions(PermissionsList.SUPPORT_CHAT_USE)
   retrieve(
     @Query('q') question = '',
     @Query('locale') locale = 'en',
@@ -104,6 +113,7 @@ export class SupportChatController {
   }
 
   @Post('context')
+  @Permissions(PermissionsList.SUPPORT_CHAT_USE)
   async context(
     @Req()
     req: {
@@ -135,6 +145,7 @@ export class SupportChatController {
   }
 
   @Post('playbook')
+  @Permissions(PermissionsList.SUPPORT_CHAT_USE)
   playbook(
     @Body()
     body: {

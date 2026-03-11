@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, StockMovementType, TransferStatus } from '@prisma/client';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
@@ -41,12 +41,13 @@ export class TransfersService {
   private async ensureExpiryPolicy(
     policy: 'ALLOW' | 'WARN' | 'BLOCK',
     batchId?: string | null,
+    businessId?: string,
   ) {
     if (!batchId || policy === 'ALLOW') {
       return { allowed: true };
     }
-    const batch = await this.prisma.batch.findUnique({
-      where: { id: batchId },
+    const batch = await this.prisma.batch.findFirst({
+      where: { id: batchId, ...(businessId ? { businessId } : {}) },
     });
     if (!batch?.expiryDate) {
       return { allowed: true };
@@ -77,6 +78,7 @@ export class TransfersService {
       businessId: string;
     },
     userId: string,
+    tx?: Prisma.TransactionClient,
   ) {
     if (!transfer.feeAmount || Number(transfer.feeAmount) <= 0) {
       return null;
@@ -84,7 +86,8 @@ export class TransfersService {
     const currency =
       (transfer.feeCurrency ?? '').trim().toUpperCase() ||
       (await this.getCurrency(transfer.businessId));
-    const expense = await this.prisma.expense.create({
+    const db = tx ?? this.prisma;
+    const expense = await db.expense.create({
       data: {
         businessId: transfer.businessId,
         branchId: transfer.sourceBranchId,
@@ -267,6 +270,10 @@ export class TransfersService {
       idempotencyKey?: string;
     },
   ) {
+    if (data.sourceBranchId === data.destinationBranchId) {
+      throw new BadRequestException('Source and destination branches must differ.');
+    }
+
     const [source, destination] = await Promise.all([
       this.prisma.branch.findFirst({
         where: { id: data.sourceBranchId, businessId },
@@ -276,7 +283,7 @@ export class TransfersService {
       }),
     ]);
     if (!source || !destination) {
-      return null;
+      throw new NotFoundException('Source or destination branch not found.');
     }
 
     const variantIds = data.items.map((item) => item.variantId);
@@ -285,10 +292,10 @@ export class TransfersService {
       select: { id: true, trackStock: true },
     });
     if (variants.length !== variantIds.length) {
-      return null;
+      throw new BadRequestException('One or more variants not found.');
     }
     if (variants.some((variant) => !variant.trackStock)) {
-      return null;
+      throw new BadRequestException('All transfer items must have stock tracking enabled.');
     }
 
     const policies = await this.getStockPolicies(businessId);
@@ -300,7 +307,7 @@ export class TransfersService {
         item.variantId,
       );
       if (!available) {
-        return null;
+        throw new BadRequestException('One or more variants are not available at the source branch.');
       }
       if (policies.batchTrackingEnabled && item.batchId) {
         const batch = await this.prisma.batch.findUnique({
@@ -312,20 +319,7 @@ export class TransfersService {
           batch.branchId !== data.sourceBranchId ||
           batch.variantId !== item.variantId
         ) {
-          return { error: 'Batch does not match source branch/variant.' };
-        }
-      }
-      if (!policies.negativeStockAllowed) {
-        const snapshot = await this.prisma.stockSnapshot.findFirst({
-          where: {
-            businessId,
-            branchId: data.sourceBranchId,
-            variantId: item.variantId,
-          },
-        });
-        const current = snapshot ? Number(snapshot.quantity) : 0;
-        if (current - item.quantity < 0) {
-          return { error: 'Insufficient stock for transfer.' };
+          throw new BadRequestException('Batch does not match the source branch or variant.');
         }
       }
     }
@@ -343,32 +337,45 @@ export class TransfersService {
           include: { items: true },
         });
       }
-      return { error: 'Idempotency key already used.' };
+      throw new BadRequestException('Idempotency key already used.');
     }
 
     let transfer;
     try {
-      transfer = await this.prisma.transfer.create({
-        data: {
-          businessId,
-          sourceBranchId: data.sourceBranchId,
-          destinationBranchId: data.destinationBranchId,
-          feeAmount:
-            data.feeAmount !== undefined && data.feeAmount !== null
-              ? new Prisma.Decimal(data.feeAmount)
-              : null,
-          feeCurrency: data.feeCurrency?.trim().toUpperCase() ?? null,
-          feeCarrier: data.feeCarrier?.trim() ?? null,
-          feeNote: data.feeNote?.trim() ?? null,
-          items: {
-            create: data.items.map((item) => ({
-              variantId: item.variantId,
-              quantity: new Prisma.Decimal(item.quantity),
-              batchId: item.batchId ?? null,
-            })),
+      transfer = await this.prisma.$transaction(async (tx) => {
+        if (!policies.negativeStockAllowed) {
+          for (const item of data.items) {
+            const snapshot = await tx.stockSnapshot.findFirst({
+              where: { businessId, branchId: data.sourceBranchId, variantId: item.variantId },
+            });
+            const current = snapshot ? Number(snapshot.quantity) : 0;
+            if (current - item.quantity < 0) {
+              throw new BadRequestException('Insufficient stock for transfer.');
+            }
+          }
+        }
+        return tx.transfer.create({
+          data: {
+            businessId,
+            sourceBranchId: data.sourceBranchId,
+            destinationBranchId: data.destinationBranchId,
+            feeAmount:
+              data.feeAmount !== undefined && data.feeAmount !== null
+                ? new Prisma.Decimal(data.feeAmount)
+                : null,
+            feeCurrency: data.feeCurrency?.trim().toUpperCase() ?? null,
+            feeCarrier: data.feeCarrier?.trim() ?? null,
+            feeNote: data.feeNote?.trim() ?? null,
+            items: {
+              create: data.items.map((item) => ({
+                variantId: item.variantId,
+                quantity: new Prisma.Decimal(item.quantity),
+                batchId: item.batchId ?? null,
+              })),
+            },
           },
-        },
-        include: { items: true },
+          include: { items: true },
+        });
       });
     } catch (error) {
       if (idempotency) {
@@ -420,11 +427,11 @@ export class TransfersService {
       include: { items: true },
     });
     if (!transfer) {
-      return null;
+      throw new NotFoundException('Transfer not found.');
     }
     this.ensureTransferScope(transfer, branchScope, 'source');
     if (transfer.status !== TransferStatus.REQUESTED) {
-      return transfer;
+      throw new BadRequestException('Transfer cannot be approved in its current status.');
     }
 
     const transferQuantity = transfer.items.reduce(
@@ -512,19 +519,20 @@ export class TransfersService {
         });
       }
 
+      await this.maybeCreateTransferExpense(
+        {
+          id: refreshed.id,
+          feeAmount: refreshed.feeAmount,
+          feeCurrency: refreshed.feeCurrency,
+          sourceBranchId: refreshed.sourceBranchId,
+          businessId,
+        },
+        userId,
+        tx,
+      );
+
       return refreshed;
     });
-
-    await this.maybeCreateTransferExpense(
-      {
-        id: updated.id,
-        feeAmount: updated.feeAmount,
-        feeCurrency: updated.feeCurrency,
-        sourceBranchId: updated.sourceBranchId,
-        businessId,
-      },
-      userId,
-    );
 
     await this.auditService.logEvent({
       businessId,
@@ -583,13 +591,13 @@ export class TransfersService {
     }
     this.ensureTransferScope(transfer, branchScope, 'destination');
     if (transfer.status === TransferStatus.REQUESTED) {
-      return { error: 'Transfer must be approved before receiving.' };
+      throw new BadRequestException('Transfer must be approved before receiving.');
     }
     if (
       transfer.status === TransferStatus.CANCELLED ||
       transfer.status === TransferStatus.COMPLETED
     ) {
-      return { error: 'Transfer is already closed.' };
+      throw new BadRequestException('Transfer is already closed.');
     }
 
     const policies = await this.getStockPolicies(businessId);
@@ -604,6 +612,16 @@ export class TransfersService {
       }
     }
 
+    // Phase 1: validate items and resolve batch IDs (creating destination batches as
+    // needed). Batch creation is a pre-flight step and is intentionally outside the
+    // stock transaction — it is idempotent and safe to retry independently.
+    type PreparedItem = {
+      item: (typeof transfer.items)[number];
+      quantity: Prisma.Decimal;
+      destinationBatchId: string | null;
+    };
+    const preparedItems: PreparedItem[] = [];
+
     for (const item of transfer.items) {
       const alreadyReceived = Number(item.receivedQuantity ?? 0);
       const remaining = Number(item.quantity) - alreadyReceived;
@@ -615,7 +633,7 @@ export class TransfersService {
         continue;
       }
       if (requested > remaining) {
-        return { error: 'Received quantity exceeds remaining quantity.' };
+        throw new BadRequestException('Received quantity exceeds remaining quantity.');
       }
 
       const quantity = new Prisma.Decimal(requested);
@@ -626,9 +644,10 @@ export class TransfersService {
         const expiryCheck = await this.ensureExpiryPolicy(
           expiryPolicy,
           sourceBatchId,
+          businessId,
         );
         if (!expiryCheck.allowed) {
-          return { error: expiryCheck.reason };
+          throw new BadRequestException(expiryCheck.reason ?? 'Batch is expired.');
         }
         const sourceBatch = await this.prisma.batch.findUnique({
           where: { id: sourceBatchId },
@@ -703,90 +722,131 @@ export class TransfersService {
         }
       }
 
-      const movement = await this.prisma.stockMovement.create({
-        data: {
-          businessId: transfer.businessId,
-          branchId: transfer.destinationBranchId,
-          variantId: item.variantId,
-          createdById: userId,
-          quantity,
-          movementType: StockMovementType.TRANSFER_IN,
-          batchId: destinationBatchId,
-        },
-      });
-      await this.auditService.logEvent({
-        businessId,
-        userId,
-        action: 'STOCK_MOVEMENT_CREATE',
-        resourceType: 'StockMovement',
-        resourceId: movement.id,
-        outcome: 'SUCCESS',
-        metadata: {
-          transferId,
-          variantId: item.variantId,
-          branchId: transfer.destinationBranchId,
-          batchId: destinationBatchId,
-          quantity: Number(quantity),
-          movementType: StockMovementType.TRANSFER_IN,
-        },
-        after: movement as unknown as Record<string, unknown>,
-      });
-
-      const snapshot = await this.prisma.stockSnapshot.upsert({
-        where: {
-          businessId_branchId_variantId: {
-            businessId: transfer.businessId,
-            branchId: transfer.destinationBranchId,
-            variantId: item.variantId,
-          },
-        },
-        create: {
-          businessId: transfer.businessId,
-          branchId: transfer.destinationBranchId,
-          variantId: item.variantId,
-          quantity,
-          inTransitQuantity: new Prisma.Decimal(0),
-        },
-        update: {
-          quantity: {
-            increment: quantity,
-          },
-          inTransitQuantity: {
-            decrement: quantity,
-          },
-        },
-      });
-      await this.auditService.logEvent({
-        businessId,
-        userId,
-        action: 'STOCK_SNAPSHOT_UPDATE',
-        resourceType: 'StockSnapshot',
-        resourceId: snapshot.id,
-        outcome: 'SUCCESS',
-        metadata: {
-          transferId,
-          variantId: item.variantId,
-          branchId: transfer.destinationBranchId,
-        },
-        after: snapshot as unknown as Record<string, unknown>,
-      });
-
-      await this.prisma.transferItem.update({
-        where: { id: item.id },
-        data: {
-          receivedQuantity: {
-            increment: quantity,
-          },
-        },
-      });
+      preparedItems.push({ item, quantity, destinationBatchId });
     }
 
-    let refreshed;
+    // Compute allReceived from original item data + what we are about to receive,
+    // so the transaction does not need a DB re-read to determine the final status.
+    const allReceived = transfer.items.every((tItem) => {
+      const alreadyReceived = Number(tItem.receivedQuantity ?? 0);
+      const prepared = preparedItems.find((p) => p.item.id === tItem.id);
+      const newReceived =
+        alreadyReceived + (prepared ? prepared.quantity.toNumber() : 0);
+      return newReceived >= Number(tItem.quantity);
+    });
+
+    // Phase 2: all stock movements, snapshots, transferItem updates, and the
+    // transfer status update are written atomically. A crash mid-loop can no longer
+    // leave the transfer partially received with inconsistent stock.
+    type StockAuditEvent = Parameters<typeof this.auditService.logEvent>[0];
+    const stockAuditEvents: StockAuditEvent[] = [];
+    let updated: Awaited<ReturnType<typeof this.prisma.transfer.update>>;
+
     try {
-      refreshed = await this.prisma.transfer.findUnique({
-        where: { id: transferId },
-        include: { items: true },
+      const txResult = await this.prisma.$transaction(async (tx) => {
+        type TxMovement = Awaited<ReturnType<typeof tx.stockMovement.create>>;
+        type TxSnapshot = Awaited<ReturnType<typeof tx.stockSnapshot.upsert>>;
+        const movements: TxMovement[] = [];
+        const snapshots: TxSnapshot[] = [];
+
+        for (const { item, quantity, destinationBatchId } of preparedItems) {
+          const movement = await tx.stockMovement.create({
+            data: {
+              businessId: transfer.businessId,
+              branchId: transfer.destinationBranchId,
+              variantId: item.variantId,
+              createdById: userId,
+              quantity,
+              movementType: StockMovementType.TRANSFER_IN,
+              batchId: destinationBatchId,
+            },
+          });
+          movements.push(movement);
+
+          const snapshot = await tx.stockSnapshot.upsert({
+            where: {
+              businessId_branchId_variantId: {
+                businessId: transfer.businessId,
+                branchId: transfer.destinationBranchId,
+                variantId: item.variantId,
+              },
+            },
+            create: {
+              businessId: transfer.businessId,
+              branchId: transfer.destinationBranchId,
+              variantId: item.variantId,
+              quantity,
+              inTransitQuantity: new Prisma.Decimal(0),
+            },
+            update: {
+              quantity: {
+                increment: quantity,
+              },
+              inTransitQuantity: {
+                decrement: quantity,
+              },
+            },
+          });
+          snapshots.push(snapshot);
+
+          await tx.transferItem.update({
+            where: { id: item.id },
+            data: {
+              receivedQuantity: {
+                increment: quantity,
+              },
+            },
+          });
+        }
+
+        const txUpdated = await tx.transfer.update({
+          where: { id: transferId },
+          data: {
+            status: allReceived
+              ? TransferStatus.COMPLETED
+              : TransferStatus.IN_TRANSIT,
+          },
+        });
+
+        return { movements, snapshots, txUpdated };
       });
+
+      updated = txResult.txUpdated;
+
+      for (let i = 0; i < preparedItems.length; i++) {
+        const { item, quantity, destinationBatchId } = preparedItems[i];
+        stockAuditEvents.push({
+          businessId,
+          userId,
+          action: 'STOCK_MOVEMENT_CREATE',
+          resourceType: 'StockMovement',
+          resourceId: txResult.movements[i].id,
+          outcome: 'SUCCESS',
+          metadata: {
+            transferId,
+            variantId: item.variantId,
+            branchId: transfer.destinationBranchId,
+            batchId: destinationBatchId,
+            quantity: Number(quantity),
+            movementType: StockMovementType.TRANSFER_IN,
+          },
+          after: txResult.movements[i] as unknown as Record<string, unknown>,
+        });
+        stockAuditEvents.push({
+          businessId,
+          userId,
+          action: 'STOCK_SNAPSHOT_UPDATE',
+          resourceType: 'StockSnapshot',
+          resourceId: txResult.snapshots[i].id,
+          outcome: 'SUCCESS',
+          metadata: {
+            transferId,
+            variantId: item.variantId,
+            branchId: transfer.destinationBranchId,
+          },
+          after: txResult.snapshots[i] as unknown as Record<string, unknown>,
+        });
+      }
     } catch (error) {
       if (idempotency) {
         await clearIdempotency(this.prisma, idempotency.record.id);
@@ -794,26 +854,16 @@ export class TransfersService {
       throw error;
     }
 
-    const allReceived =
-      refreshed?.items.every(
-        (item) => Number(item.receivedQuantity) >= Number(item.quantity),
-      ) ?? false;
-
-    const updated = await this.prisma.transfer.update({
-      where: { id: transferId },
-      data: {
-        status: allReceived
-          ? TransferStatus.COMPLETED
-          : TransferStatus.IN_TRANSIT,
-      },
-    });
-
     if (idempotency) {
       await finalizeIdempotency(this.prisma, idempotency.record.id, {
         resourceType: 'Transfer',
         resourceId: updated.id,
         metadata: { status: updated.status },
       });
+    }
+
+    for (const event of stockAuditEvents) {
+      await this.auditService.logEvent(event);
     }
 
     await this.auditService.logEvent({
@@ -852,7 +902,7 @@ export class TransfersService {
       include: { items: true },
     });
     if (!transfer) {
-      return null;
+      throw new NotFoundException('Transfer not found.');
     }
     this.ensureTransferScope(transfer, branchScope, 'either');
 

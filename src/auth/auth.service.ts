@@ -1,4 +1,9 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
@@ -83,7 +88,14 @@ export class AuthService {
       where: { email },
     });
 
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    // Always run verifyPassword to prevent user-enumeration via timing difference.
+    const DUMMY_HASH =
+      '$2b$12$invalidhashfortimingprotectionXXXXXXXXXXXXXXXXXXXXXX';
+    const passwordValid = verifyPassword(
+      password,
+      user?.passwordHash ?? DUMMY_HASH,
+    );
+    if (!user || !passwordValid) {
       throw new UnauthorizedException('Invalid credentials.');
     }
 
@@ -222,7 +234,6 @@ export class AuthService {
   }
 
   async refreshToken(
-    userId: string,
     refreshToken: string,
     businessId: string,
     deviceId?: string,
@@ -230,12 +241,15 @@ export class AuthService {
   ) {
     const tokenHash = this.hashToken(refreshToken);
     const stored = await this.prisma.refreshToken.findFirst({
-      where: { userId, tokenHash },
+      where: { tokenHash },
     });
 
     if (!stored || stored.expiresAt < new Date()) {
       throw new UnauthorizedException('Refresh token expired.');
     }
+
+    // Derive userId from the stored record — never trust it from the client
+    const userId = stored.userId;
 
     if (stored.revokedAt) {
       await this.revokeAllRefreshTokens(
@@ -352,9 +366,19 @@ export class AuthService {
     businessId?: string,
     requestMetadata?: Record<string, unknown>,
   ) {
+    // Verify the presented refreshToken is valid for this user before revoking
+    // all sessions, preventing a stolen access token from force-logging-out all devices.
     const tokenHash = this.hashToken(refreshToken);
+    const tokenRecord = await this.prisma.refreshToken.findFirst({
+      where: { userId, tokenHash, revokedAt: null },
+    });
+    if (!tokenRecord) {
+      return;
+    }
+
+    // Revoke all active refresh tokens for this user to invalidate all sessions.
     await this.prisma.refreshToken.updateMany({
-      where: { userId, tokenHash },
+      where: { userId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
 
@@ -389,6 +413,11 @@ export class AuthService {
       return;
     }
 
+    // Invalidate any existing unused reset tokens before issuing a new one (Fix P3-G1-H3)
+    await this.prisma.passwordResetToken.deleteMany({
+      where: { userId: user.id, usedAt: null },
+    });
+
     const token = crypto.randomBytes(32).toString('hex');
     const tokenHash = this.hashToken(token);
     const expiresAt = new Date();
@@ -413,10 +442,9 @@ export class AuthService {
 
     const locale: 'en' = 'en';
     const appBaseUrl = this.configService.get<string>('appBaseUrl') || '';
+    // Do NOT include userId in the URL — it leaks the user's identity in server logs (Fix P3-G1-C5-frontend)
     const resetUrl = appBaseUrl
-      ? `${appBaseUrl}/${locale}/password-reset/confirm?token=${encodeURIComponent(
-          token,
-        )}&userId=${encodeURIComponent(user.id)}`
+      ? `${appBaseUrl}/${locale}/password-reset/confirm?token=${encodeURIComponent(token)}`
       : undefined;
     const emailPayload = buildBrandedEmail({
       subject: this.i18n.t(locale, 'email.passwordReset.subject'),
@@ -442,7 +470,7 @@ export class AuthService {
       ...emailPayload,
     });
 
-    return { token, userId: user.id };
+    return { requested: true };
   }
 
   async requestPasswordResetByEmail(email: string, businessId?: string) {
@@ -501,6 +529,11 @@ export class AuthService {
       return null;
     }
 
+    // Invalidate any existing unused verification tokens before issuing a new one (Fix P3-G1-H2)
+    await this.prisma.emailVerificationToken.deleteMany({
+      where: { userId: user.id, usedAt: null },
+    });
+
     const token = crypto.randomBytes(32).toString('hex');
     const tokenHash = this.hashToken(token);
     const expiresAt = new Date();
@@ -556,7 +589,7 @@ export class AuthService {
       ...verifyEmailPayload,
     });
 
-    return { token };
+    return { ok: true as const };
   }
 
   async requestEmailVerificationByEmail(email: string, businessId: string) {
@@ -594,15 +627,31 @@ export class AuthService {
       data: { usedAt: new Date() },
     });
 
+    // Only promote to ACTIVE if the user is not already SUSPENDED or DEACTIVATED (Fix P3-G1-H4)
+    const existingUser = await this.prisma.user.findUnique({
+      where: { id: stored.userId },
+    });
+    if (!existingUser) {
+      throw new UnauthorizedException('User not found.');
+    }
+    const isSuspendedOrDeactivated = ['SUSPENDED', 'DEACTIVATED'].includes(
+      existingUser.status,
+    );
+
     const user = await this.prisma.user.update({
       where: { id: stored.userId },
-      data: { emailVerifiedAt: new Date(), status: 'ACTIVE' },
+      data: {
+        emailVerifiedAt: new Date(),
+        ...(isSuspendedOrDeactivated ? {} : { status: 'ACTIVE' }),
+      },
     });
 
-    await this.prisma.businessUser.updateMany({
-      where: { userId: user.id, status: 'PENDING' },
-      data: { status: 'ACTIVE' },
-    });
+    if (!isSuspendedOrDeactivated) {
+      await this.prisma.businessUser.updateMany({
+        where: { userId: user.id, status: 'PENDING' },
+        data: { status: 'ACTIVE' },
+      });
+    }
 
     const memberships = await this.prisma.businessUser.findMany({
       where: { userId: user.id },
@@ -720,6 +769,9 @@ export class AuthService {
       },
     });
 
+    // Revoke all active sessions after password reset (Fix P3-G1-C4)
+    await this.revokeAllRefreshTokens(stored.userId);
+
     const user = await this.prisma.user.findUnique({
       where: { id: stored.userId },
     });
@@ -733,6 +785,43 @@ export class AuthService {
         outcome: 'SUCCESS',
       });
     }
+  }
+
+  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        passwordHash: true,
+        memberships: { select: { businessId: true }, take: 1 },
+      },
+    });
+    if (!user) {
+      throw new UnauthorizedException('User not found.');
+    }
+    if (!verifyPassword(currentPassword, user.passwordHash)) {
+      throw new UnauthorizedException('Current password is incorrect.');
+    }
+    if (!validatePassword(newPassword)) {
+      throw new BadRequestException('New password does not meet requirements.');
+    }
+    const businessId = user.memberships[0]?.businessId ?? 'unknown';
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        passwordHash: hashPassword(newPassword),
+        mustResetPassword: false,
+        passwordUpdatedAt: new Date(),
+      },
+    });
+    await this.auditService.logEvent({
+      businessId,
+      userId: user.id,
+      action: 'PASSWORD_CHANGED',
+      resourceType: 'User',
+      resourceId: user.id,
+      outcome: 'SUCCESS',
+    });
   }
 
   async setPassword(userId: string, password: string) {
@@ -765,15 +854,34 @@ export class AuthService {
     return this.signIn({ email, password, businessId, deviceId }, metadata);
   }
 
+  // ACCEPTED RISK: JWT access tokens are stored in localStorage (not httpOnly cookies).
+  // This means XSS attacks can steal tokens. This is an accepted trade-off given the
+  // application's SSR/Next.js architecture where httpOnly cookies require additional
+  // infrastructure. Mitigation: short-lived access tokens (15m), refresh token rotation,
+  // reuse detection, and strict CSP headers. This should be revisited if XSS risk increases.
   async switchBusinessForUser(data: {
     userId: string;
     businessId: string;
     deviceId?: string;
+    refreshToken?: string;
     metadata?: Record<string, unknown>;
   }) {
     if (!data.deviceId) {
       throw new UnauthorizedException('Device ID required.');
     }
+    // Require a valid refresh token to prove the caller has a real session,
+    // not just a stolen access token.
+    if (!data.refreshToken) {
+      throw new UnauthorizedException('Refresh token required to switch business.');
+    }
+    const tokenHash = this.hashToken(data.refreshToken);
+    const storedToken = await this.prisma.refreshToken.findFirst({
+      where: { userId: data.userId, tokenHash, revokedAt: null },
+    });
+    if (!storedToken || storedToken.expiresAt < new Date()) {
+      throw new UnauthorizedException('Invalid or expired refresh token.');
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { id: data.userId },
     });
@@ -822,6 +930,13 @@ export class AuthService {
     };
 
     const accessToken = await this.jwtService.signAsync(payload);
+
+    // Revoke the old refresh token before issuing a new one (Fix P3-G1-C2)
+    await this.prisma.refreshToken.updateMany({
+      where: { id: storedToken.id },
+      data: { revokedAt: new Date() },
+    });
+
     const refreshToken = await this.issueRefreshToken(user.id, data.deviceId);
 
     await this.auditService.logEvent({
@@ -869,11 +984,14 @@ export class AuthService {
   }
 
   async createPlatformAdmin(email: string, password: string) {
-    const existing = await this.prisma.platformAdmin.findUnique({
-      where: { email },
-    });
-    if (existing) {
-      return existing;
+    const anyAdmin = await this.prisma.platformAdmin.findFirst();
+    if (anyAdmin) {
+      if (anyAdmin.email === email) {
+        return anyAdmin;
+      }
+      throw new ForbiddenException(
+        'A platform admin already exists. Additional admins must be created via the platform admin API.',
+      );
     }
 
     return this.prisma.platformAdmin.create({
@@ -914,7 +1032,76 @@ export class AuthService {
     });
 
     const accessToken = await this.jwtService.signAsync(payload);
-    return { accessToken };
+    const refreshToken = await this.issuePlatformAdminRefreshToken(admin.id);
+    return { accessToken, refreshToken };
+  }
+
+  async refreshPlatformAdminToken(refreshToken: string) {
+    // NOTE: ACCEPTED RISK — Platform admin refresh tokens are not bound to IP/device.
+    // This is an accepted trade-off: platform admins operate from varied environments
+    // and binding to IP/device would cause operational disruption. The risk is mitigated
+    // by short-lived access tokens, token rotation on each refresh, and reuse detection.
+    const tokenHash = this.hashToken(refreshToken);
+    const stored = await this.prisma.platformAdminRefreshToken.findFirst({
+      where: { tokenHash, revokedAt: null },
+    });
+
+    if (!stored || stored.expiresAt < new Date()) {
+      throw new UnauthorizedException('Refresh token expired or invalid.');
+    }
+
+    const admin = await this.prisma.platformAdmin.findUnique({
+      where: { id: stored.platformAdminId },
+    });
+    if (!admin || admin.status !== 'ACTIVE') {
+      throw new UnauthorizedException('Admin not found or inactive.');
+    }
+
+    // Rotate: revoke old token and issue a new one
+    await this.prisma.platformAdminRefreshToken.update({
+      where: { id: stored.id },
+      data: { revokedAt: new Date() },
+    });
+
+    const payload: JwtPayload = {
+      sub: admin.id,
+      email: admin.email,
+      businessId: 'platform',
+      roleIds: [],
+      permissions: [],
+      branchScope: [],
+      subscriptionState: 'ACTIVE',
+      scope: 'platform',
+    };
+
+    const accessToken = await this.jwtService.signAsync(payload);
+    const newRefreshToken = await this.issuePlatformAdminRefreshToken(admin.id);
+    return { accessToken, refreshToken: newRefreshToken };
+  }
+
+  async logoutPlatformAdmin(refreshToken: string) {
+    const tokenHash = this.hashToken(refreshToken);
+    await this.prisma.platformAdminRefreshToken.updateMany({
+      where: { tokenHash, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
+  private async issuePlatformAdminRefreshToken(platformAdminId: string) {
+    const token = crypto.randomBytes(48).toString('hex');
+    const tokenHash = this.hashToken(token);
+    const expiresInDays = parseInt(
+      this.configService.get<string>('jwt.refreshDays') ?? '30',
+      10,
+    );
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + expiresInDays);
+
+    await this.prisma.platformAdminRefreshToken.create({
+      data: { platformAdminId, tokenHash, expiresAt },
+    });
+
+    return token;
   }
 
   async signInSupportAccess(token: string) {
@@ -923,10 +1110,16 @@ export class AuthService {
       throw new UnauthorizedException('Invalid support access token.');
     }
 
-    const scopeList = Array.isArray(session.scope)
-      ? session.scope.filter((item) => typeof item === 'string')
+    // session.scope === null/undefined → unrestricted (full SUPPORT_PERMISSIONS)
+    // session.scope === []             → explicitly restricted to nothing (deny all)
+    // session.scope === ['sales', ...] → only those specific permissions
+    // Unknown scope keys are silently ignored (not a fallback to full access).
+    const rawScope = session.scope as unknown;
+    const hasExplicitScope = Array.isArray(rawScope);
+    const scopeList: string[] = hasExplicitScope
+      ? (rawScope as unknown[]).filter((item): item is string => typeof item === 'string')
       : [];
-    const scopedPermissions = scopeList.length
+    const scopedPermissions: string[] = hasExplicitScope
       ? Array.from(
           new Set(
             scopeList.flatMap((key) => SUPPORT_SCOPE_PERMISSIONS[key] ?? []),

@@ -15,6 +15,7 @@ import { buildPaginatedResponse, parsePagination } from '../common/pagination';
 import type { Response } from 'express';
 import PDFDocument from 'pdfkit';
 import { resolveResourceNames } from '../common/resource-labels';
+import { requireBusinessId } from '../common/request-context';
 
 const TRACE_KEYS = new Set([
   'requestId',
@@ -480,7 +481,7 @@ export class AuditController {
       return buildPaginatedResponse([], pagination.take, 0);
     }
     const where = {
-      ...this.buildWhere(req.user?.businessId || '', branchScope, query),
+      ...this.buildWhere(requireBusinessId(req), branchScope, query),
     };
     const includeTotal =
       query.includeTotal === 'true' || query.includeTotal === '1';
@@ -615,7 +616,7 @@ export class AuditController {
   ) {
     const branchScope: string[] = req.user?.branchScope || [];
     const where = this.buildWhere(
-      req.user?.businessId || '',
+      requireBusinessId(req),
       branchScope,
       query,
     );
@@ -709,7 +710,7 @@ export class AuditController {
     @Param('id') id: string,
   ) {
     return this.prisma.auditLog.findFirst({
-      where: { id, businessId: req.user?.businessId || '' },
+      where: { id, businessId: requireBusinessId(req) },
     });
   }
 }

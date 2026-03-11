@@ -12,6 +12,7 @@ import {
 import { SuppliersService } from './suppliers.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
+import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('suppliers')
 export class SuppliersController {
@@ -30,13 +31,13 @@ export class SuppliersController {
       balanceDue?: string;
     },
   ) {
-    return this.suppliersService.list(req.user?.businessId || '', query);
+    return this.suppliersService.list(requireBusinessId(req), query);
   }
 
   @Post()
   @Permissions(PermissionsList.SUPPLIERS_WRITE)
   create(
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       name: string;
@@ -51,14 +52,14 @@ export class SuppliersController {
     if (!body.name?.trim()) {
       throw new BadRequestException('name is required.');
     }
-    return this.suppliersService.create(req.user?.businessId || '', body);
+    return this.suppliersService.create(requireBusinessId(req), requireUserId(req), body);
   }
 
   @Put(':id')
   @Permissions(PermissionsList.SUPPLIERS_WRITE)
   update(
     @Param('id') id: string,
-    @Req() req: { user?: { businessId: string } },
+    @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
     body: {
       name?: string;
@@ -70,7 +71,7 @@ export class SuppliersController {
       status?: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
     },
   ) {
-    return this.suppliersService.update(req.user?.businessId || '', id, {
+    return this.suppliersService.update(requireBusinessId(req), id, requireUserId(req), {
       ...body,
       leadTimeDays: body.leadTimeDays === null ? undefined : body.leadTimeDays,
     });
