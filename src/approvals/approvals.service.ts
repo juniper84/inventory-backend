@@ -10,6 +10,7 @@ import {
 import {
   ApprovalStatus,
   ApprovalThresholdType,
+  GainReason,
   LossReason,
   Prisma,
   RecordStatus,
@@ -140,6 +141,13 @@ export class ApprovalsService {
       Object.values(LossReason).includes(lossReasonValue as LossReason)
         ? (lossReasonValue as LossReason)
         : undefined;
+    const gainReasonValue =
+      typeof payload.gainReason === 'string' ? payload.gainReason : null;
+    const gainReason =
+      gainReasonValue &&
+      Object.values(GainReason).includes(gainReasonValue as GainReason)
+        ? (gainReasonValue as GainReason)
+        : undefined;
     if (!branchId || !variantId || quantity === null || !type) {
       return null;
     }
@@ -153,6 +161,7 @@ export class ApprovalsService {
       batchId:
         typeof payload.batchId === 'string' ? payload.batchId : undefined,
       lossReason,
+      gainReason,
       idempotencyKey:
         typeof payload.idempotencyKey === 'string'
           ? payload.idempotencyKey

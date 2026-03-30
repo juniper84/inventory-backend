@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import OpenAI from 'openai';
-import { SupportChatReasoning } from './support-chat-reasoner.service';
+import { SupportChatReasoning, DependencyChainLink } from './support-chat-reasoner.service';
 
 type ManualLocale = 'en' | 'sw';
 type ChatIntent = 'explain_page' | 'troubleshoot_error' | 'how_to' | 'what_next';
@@ -114,6 +114,7 @@ export class SupportChatComposerService {
       input.context.latest_error.error_code || input.context.latest_error.error_message,
     );
     const rawReasonedBlocker = input.reasoning.primary_blocker;
+    const dependencyChain: DependencyChainLink[] = input.reasoning.dependency_chain ?? [];
     const purposeText = this.extractPurpose(results);
     const workflowSteps = this.extractWorkflow(results);
     const prerequisiteChecks = this.extractPrerequisites(results);
@@ -183,6 +184,7 @@ export class SupportChatComposerService {
             depth,
             playbookSteps: playbook?.steps ?? [],
             reasonedActions: reasonedBlocker?.actions ?? [],
+            chainActions: dependencyChain.length > 0 ? dependencyChain[0].actions : [],
             workflowSteps,
             prerequisiteChecks,
             escalationContact: input.escalationContact,
@@ -252,6 +254,7 @@ export class SupportChatComposerService {
       relatedRoutes,
       evidence,
       context: input.context,
+      dependencyChain,
     });
 
     return {
@@ -282,6 +285,7 @@ export class SupportChatComposerService {
         checks: input.reasoning.checks,
         primary_blocker: input.reasoning.primary_blocker,
         secondary_blockers: input.reasoning.secondary_blockers,
+        dependency_chain: input.reasoning.dependency_chain,
       },
       meta: {
         retrieval_mode: input.retrieval.retrieval_mode,
@@ -312,6 +316,7 @@ export class SupportChatComposerService {
     relatedRoutes: Array<{ route: string; reason: string }>;
     evidence: string[];
     context: ContextPayload;
+    dependencyChain: DependencyChainLink[];
   }): IntentPayload {
     const sections: IntentPayloadSection[] = [];
 
@@ -374,6 +379,16 @@ export class SupportChatComposerService {
           lines: input.steps.slice(0, 5),
         });
       }
+      if (input.dependencyChain.length > 0) {
+        sections.push({
+          key: 'dependency-chain',
+          title: input.locale === 'sw' ? 'Mlolongo wa mahitaji' : 'What else you need to resolve',
+          kind: 'list',
+          lines: input.dependencyChain.map((link) => link.blocker_message),
+          collapsed: true,
+          secondary: true,
+        });
+      }
       const technicalLines = this.buildTechnicalLines({
         locale: input.locale,
         errorCode: input.context.latest_error.error_code,
@@ -408,6 +423,16 @@ export class SupportChatComposerService {
           lines: input.steps.slice(0, 4),
         });
       }
+      if (input.dependencyChain.length > 0) {
+        sections.push({
+          key: 'dependency-chain',
+          title: input.locale === 'sw' ? 'Mlolongo wa mahitaji' : 'What else you need to resolve',
+          kind: 'list',
+          lines: input.dependencyChain.map((link) => link.blocker_message),
+          collapsed: true,
+          secondary: true,
+        });
+      }
       if (input.prerequisites.length) {
         sections.push({
           key: 'checks',
@@ -433,6 +458,16 @@ export class SupportChatComposerService {
         title: input.locale === 'sw' ? 'Hatua' : 'Steps',
         kind: 'list',
         lines: input.steps.slice(0, 4),
+      });
+    }
+    if (input.dependencyChain.length > 0) {
+      sections.push({
+        key: 'dependency-chain',
+        title: input.locale === 'sw' ? 'Mlolongo wa mahitaji' : 'What else you need to resolve',
+        kind: 'list',
+        lines: input.dependencyChain.map((link) => link.blocker_message),
+        collapsed: true,
+        secondary: true,
       });
     }
     if (input.prerequisites.length) {
@@ -640,6 +675,7 @@ export class SupportChatComposerService {
     depth: ResponseDepth;
     playbookSteps: string[];
     reasonedActions: string[];
+    chainActions: string[];
     workflowSteps: string[];
     prerequisiteChecks: string[];
     escalationContact: string;
@@ -652,6 +688,10 @@ export class SupportChatComposerService {
       base.push(...input.playbookSteps);
     } else if (input.reasonedActions.length) {
       base.push(...input.reasonedActions);
+      // Append first chain-level actions so the user sees the full resolution path
+      if (input.chainActions.length && base.length < max) {
+        base.push(...input.chainActions);
+      }
     } else if (input.intent === 'explain_page') {
       base.push(...input.workflowSteps.slice(0, 2));
       if (input.depth !== 'simple') {

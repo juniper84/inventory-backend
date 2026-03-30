@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { PlatformEventService } from '../platform/platform-event.service';
 import {
   Prisma,
   SubscriptionRequestStatus,
@@ -76,6 +77,7 @@ export class SubscriptionService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
     private readonly auditService: AuditService,
+    private readonly platformEvents: PlatformEventService,
   ) {}
 
   async getSubscription(
@@ -345,6 +347,12 @@ export class SubscriptionService {
         type,
         requestedTier: data.requestedTier ?? null,
       },
+    });
+    this.platformEvents.emit('subscription_request.created', {
+      requestId: request.id,
+      businessId,
+      type,
+      requestedTier: data.requestedTier ?? null,
     });
     return request;
   }

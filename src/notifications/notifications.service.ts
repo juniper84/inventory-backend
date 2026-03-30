@@ -835,7 +835,7 @@ export class NotificationsService {
         this.allowUserChannel(preferences, 'email')
       ) {
         try {
-          const locale: 'en' = 'en';
+          const locale = preferences.locale;
           const ctaUrl = this.buildNotificationUrl(
             (enriched.metadata as Record<string, unknown> | null) ?? null,
           );
@@ -966,7 +966,7 @@ export class NotificationsService {
       this.allowUserChannel(preferences, 'email')
     ) {
       try {
-        const locale: 'en' = 'en';
+        const locale = preferences.locale;
         const ctaUrl = this.buildNotificationUrl(
           (enriched.metadata as Record<string, unknown> | null) ?? null,
         );

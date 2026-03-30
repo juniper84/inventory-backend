@@ -98,11 +98,18 @@ type ScoredReasoningBlocker = ReasoningBlocker & {
   score: number;
 };
 
+export type DependencyChainLink = {
+  page_route: string;
+  blocker_message: string;
+  actions: string[];
+};
+
 export type SupportChatReasoning = {
   mode: ReasoningMode;
   checks: ReasoningCheck[];
   primary_blocker: ReasoningBlocker | null;
   secondary_blockers: ReasoningBlocker[];
+  dependency_chain: DependencyChainLink[] | null;
 };
 
 @Injectable()
@@ -119,6 +126,123 @@ export class SupportChatReasonerService {
       byId: Map<string, ManualEntry>;
     }
   >();
+
+  // Data-driven lookup: route pattern suffix → readiness check + messages.
+  // Any before-dependency declared in a manual entry's related_pages that
+  // matches one of these patterns is automatically evaluated — no hardcoding
+  // required per-page. Add a new entry here to cover any future dependency.
+  private readonly SEQUENCE_READINESS_MAP: Record<
+    string,
+    {
+      isBlocked: (readiness: Record<string, unknown>) => boolean;
+      detailEn: string;
+      detailSw: string;
+      messageEn: string;
+      messageSw: string;
+      actionsEn: string[];
+      actionsSw: string[];
+    }
+  > = {
+    '/catalog/categories': {
+      isBlocked: (r) => this.asNumber(r.categories_count) === 0,
+      detailEn: 'Sequence violation: category setup prerequisite is incomplete.',
+      detailSw: 'Sequence imevunjika: hatua ya categories haijakamilika.',
+      messageEn: 'This task requires Categories setup to be completed first.',
+      messageSw: 'Hii hatua inahitaji ukamilishe setup ya Categories kwanza.',
+      actionsEn: [
+        'Open Catalog - Categories and create at least one active category.',
+        'Return to this page and retry the action.',
+      ],
+      actionsSw: [
+        'Fungua Catalog - Categories na unda angalau category moja ACTIVE.',
+        'Rudi kwenye ukurasa huu na ujaribu tena.',
+      ],
+    },
+    '/catalog/products': {
+      isBlocked: (r) => this.asNumber(r.products_count) === 0,
+      detailEn: 'Sequence violation: product setup prerequisite is incomplete.',
+      detailSw: 'Sequence imevunjika: setup ya bidhaa haijakamilika.',
+      messageEn: 'This task requires Products setup before proceeding.',
+      messageSw: 'Hii hatua inahitaji setup ya Bidhaa kabla ya kuendelea.',
+      actionsEn: [
+        'Create at least one product on Catalog - Products.',
+        'Return and continue this workflow after product setup.',
+      ],
+      actionsSw: [
+        'Unda angalau bidhaa moja kwenye Catalog - Products.',
+        'Rudi hapa baada ya kukamilisha setup ya bidhaa.',
+      ],
+    },
+    '/catalog/variants': {
+      isBlocked: (r) => this.asNumber(r.variants_count) === 0,
+      detailEn: 'Sequence violation: variant setup prerequisite is incomplete.',
+      detailSw: 'Sequence imevunjika: setup ya vibadala haijakamilika.',
+      messageEn: 'This task requires at least one active variant first.',
+      messageSw: 'Hii hatua inahitaji angalau kibadala kimoja cha ACTIVE kwanza.',
+      actionsEn: [
+        'Set up variants on Catalog - Variants.',
+        'Return to this page after variants are active.',
+      ],
+      actionsSw: [
+        'Sanidi vibadala kwenye Catalog - Variants.',
+        'Rudi hapa baada ya vibadala kuwa ACTIVE.',
+      ],
+    },
+    '/suppliers': {
+      isBlocked: (r) => this.asBoolean(r.has_suppliers) === false,
+      detailEn: 'Sequence violation: supplier setup prerequisite is incomplete.',
+      detailSw: 'Sequence imevunjika: setup ya supplier haijakamilika.',
+      messageEn: 'This workflow requires supplier setup first.',
+      messageSw: 'Mtiririko huu unahitaji setup ya supplier kwanza.',
+      actionsEn: [
+        'Create a supplier on the Suppliers page.',
+        'Retry this procurement step afterward.',
+      ],
+      actionsSw: [
+        'Unda supplier kwenye Suppliers page.',
+        'Rudia hatua hii ya procurement baada ya hapo.',
+      ],
+    },
+    '/shifts': {
+      isBlocked: (r) => this.asBoolean(r.has_open_shift_in_active_branch) === false,
+      detailEn: 'Sequence violation: shift setup prerequisite is incomplete.',
+      detailSw: 'Sequence imevunjika: setup ya shift haijakamilika.',
+      messageEn: 'POS flow requires an open shift before this action.',
+      messageSw: 'Mtiririko wa POS unahitaji shift OPEN kabla ya hatua hii.',
+      actionsEn: ['Open a shift on the Shifts page.', 'Retry the POS action.'],
+      actionsSw: ['Fungua shift kwenye Shifts page.', 'Rudia hatua ya POS.'],
+    },
+    '/branches': {
+      isBlocked: (r) => this.asBoolean(r.has_active_branch) === false,
+      detailEn: 'Sequence violation: no active branch is selected.',
+      detailSw: 'Sequence imevunjika: hakuna tawi lililochaguliwa.',
+      messageEn: 'An active branch must be selected before this action.',
+      messageSw: 'Lazima uchague tawi kabla ya hatua hii.',
+      actionsEn: [
+        'Go to Settings - Branches and ensure at least one branch is active.',
+        'Select the branch using the branch switcher.',
+      ],
+      actionsSw: [
+        'Nenda Settings - Branches na uhakikishe tawi angalau moja liko ACTIVE.',
+        'Chagua tawi ukitumia branch switcher.',
+      ],
+    },
+    '/price-lists': {
+      isBlocked: (r) => this.asBoolean(r.has_price_lists) === false,
+      detailEn: 'Sequence violation: no price list is configured.',
+      detailSw: 'Sequence imevunjika: hakuna orodha ya bei iliyosanidiwa.',
+      messageEn: 'This workflow requires at least one price list to be configured first.',
+      messageSw: 'Mtiririko huu unahitaji angalau orodha moja ya bei kusanidiwa kwanza.',
+      actionsEn: [
+        'Create a price list on the Price Lists page.',
+        'Assign the price list to this workflow and retry.',
+      ],
+      actionsSw: [
+        'Unda orodha ya bei kwenye Price Lists page.',
+        'Weka orodha ya bei kwa mtiririko huu kisha ujaribu tena.',
+      ],
+    },
+  };
 
   analyze(input: {
     locale: ManualLocale;
@@ -187,6 +311,7 @@ export class SupportChatReasonerService {
         checks,
         primary_blocker: null,
         secondary_blockers: [],
+        dependency_chain: null,
       };
     }
 
@@ -239,6 +364,7 @@ export class SupportChatReasonerService {
         checks,
         primary_blocker: blockers[0] ? this.stripScore(blockers[0]) : null,
         secondary_blockers: blockers.slice(1).map((item) => this.stripScore(item)),
+        dependency_chain: null,
       };
     }
 
@@ -251,6 +377,15 @@ export class SupportChatReasonerService {
     if (sequenceCheck.blocker) {
       blockers.push(this.withScore(sequenceCheck.blocker));
     }
+    const dependencyChain =
+      sequenceCheck.blockingRoute
+        ? this.traverseDependencyChain(
+            locale,
+            sequenceCheck.blockingRoute,
+            input.context.readiness_signals,
+            1,
+          )
+        : null;
 
     const permissionCheck = this.evaluatePermissions({
       locale,
@@ -318,6 +453,7 @@ export class SupportChatReasonerService {
           actions: [],
         },
         secondary_blockers: deduped.slice(0, 2).map((item) => this.stripScore(item)),
+        dependency_chain: dependencyChain?.length ? dependencyChain : null,
       };
     }
     return {
@@ -325,6 +461,7 @@ export class SupportChatReasonerService {
       checks,
       primary_blocker: deduped[0] ? this.stripScore(deduped[0]) : null,
       secondary_blockers: deduped.slice(1, 3).map((item) => this.stripScore(item)),
+      dependency_chain: dependencyChain?.length ? dependencyChain : null,
     };
   }
 
@@ -427,7 +564,11 @@ export class SupportChatReasonerService {
     locale: ManualLocale;
     entry: ManualEntry;
     readiness: Record<string, unknown>;
-  }) {
+  }): {
+    check: ReasoningCheck;
+    blocker: ReasoningBlocker | null;
+    blockingRoute: string | null;
+  } {
     const beforePages = (input.entry.related_pages ?? []).filter(
       (item) => item.order?.toLowerCase() === 'before',
     );
@@ -442,115 +583,31 @@ export class SupportChatReasonerService {
               : 'No upstream sequence dependency is declared for this page.',
         },
         blocker: null,
+        blockingRoute: null,
       };
     }
 
-    const categoriesCount = this.asNumber(input.readiness.categories_count);
-    const productsCount = this.asNumber(input.readiness.products_count);
-    const variantsCount = this.asNumber(input.readiness.variants_count);
-    const hasSuppliers = this.asBoolean(input.readiness.has_suppliers);
-    const hasOpenShift = this.asBoolean(input.readiness.has_open_shift_in_active_branch);
-
-    const rules: Array<{
-      when: boolean;
-      detailEn: string;
-      detailSw: string;
-      messageEn: string;
-      messageSw: string;
-      actionsEn: string[];
-      actionsSw: string[];
-    }> = [
-      {
-        when:
-          beforePages.some((item) => item.route.includes('/catalog/categories')) &&
-          categoriesCount === 0,
-        detailEn: 'Sequence violation: category setup prerequisite is incomplete.',
-        detailSw: 'Sequence imevunjika: hatua ya categories haijakamilika.',
-        messageEn: 'This task requires Categories setup to be completed first.',
-        messageSw: 'Hii hatua inahitaji ukamilishe setup ya Categories kwanza.',
-        actionsEn: [
-          'Open Catalog - Categories and create at least one active category.',
-          'Return to this page and retry the action.',
-        ],
-        actionsSw: [
-          'Fungua Catalog - Categories na unda angalau category moja ACTIVE.',
-          'Rudi kwenye ukurasa huu na ujaribu tena.',
-        ],
-      },
-      {
-        when:
-          beforePages.some((item) => item.route.includes('/catalog/products')) &&
-          productsCount === 0,
-        detailEn: 'Sequence violation: product setup prerequisite is incomplete.',
-        detailSw: 'Sequence imevunjika: setup ya bidhaa haijakamilika.',
-        messageEn: 'This task requires Products setup before proceeding.',
-        messageSw: 'Hii hatua inahitaji setup ya Bidhaa kabla ya kuendelea.',
-        actionsEn: [
-          'Create at least one product on Catalog - Products.',
-          'Return and continue this workflow after product setup.',
-        ],
-        actionsSw: [
-          'Unda angalau bidhaa moja kwenye Catalog - Products.',
-          'Rudi hapa baada ya kukamilisha setup ya bidhaa.',
-        ],
-      },
-      {
-        when:
-          beforePages.some((item) => item.route.includes('/catalog/variants')) &&
-          variantsCount === 0,
-        detailEn: 'Sequence violation: variant setup prerequisite is incomplete.',
-        detailSw: 'Sequence imevunjika: setup ya vibadala haijakamilika.',
-        messageEn: 'This task requires at least one active variant first.',
-        messageSw: 'Hii hatua inahitaji angalau kibadala kimoja cha ACTIVE kwanza.',
-        actionsEn: [
-          'Set up variants on Catalog - Variants.',
-          'Return to this page after variants are active.',
-        ],
-        actionsSw: [
-          'Sanidi vibadala kwenye Catalog - Variants.',
-          'Rudi hapa baada ya vibadala kuwa ACTIVE.',
-        ],
-      },
-      {
-        when: beforePages.some((item) => item.route.includes('/suppliers')) && hasSuppliers === false,
-        detailEn: 'Sequence violation: supplier setup prerequisite is incomplete.',
-        detailSw: 'Sequence imevunjika: setup ya supplier haijakamilika.',
-        messageEn: 'This workflow requires supplier setup first.',
-        messageSw: 'Mtiririko huu unahitaji setup ya supplier kwanza.',
-        actionsEn: [
-          'Create a supplier on the Suppliers page.',
-          'Retry this procurement step afterward.',
-        ],
-        actionsSw: [
-          'Unda supplier kwenye Suppliers page.',
-          'Rudia hatua hii ya procurement baada ya hapo.',
-        ],
-      },
-      {
-        when: beforePages.some((item) => item.route.includes('/shifts')) && hasOpenShift === false,
-        detailEn: 'Sequence violation: shift setup prerequisite is incomplete.',
-        detailSw: 'Sequence imevunjika: setup ya shift haijakamilika.',
-        messageEn: 'POS flow requires an open shift before this action.',
-        messageSw: 'Mtiririko wa POS unahitaji shift OPEN kabla ya hatua hii.',
-        actionsEn: ['Open a shift on the Shifts page.', 'Retry the POS action.'],
-        actionsSw: ['Fungua shift kwenye Shifts page.', 'Rudia hatua ya POS.'],
-      },
-    ];
-
-    const matchedRule = rules.find((rule) => rule.when);
-    if (matchedRule) {
-      return {
-        check: {
-          id: 'sequence_order' as const,
-          status: 'failed' as ReasoningCheckStatus,
-          detail: input.locale === 'sw' ? matchedRule.detailSw : matchedRule.detailEn,
-        },
-        blocker: {
-          type: 'sequence_violation' as const,
-          message: input.locale === 'sw' ? matchedRule.messageSw : matchedRule.messageEn,
-          actions: input.locale === 'sw' ? matchedRule.actionsSw : matchedRule.actionsEn,
-        },
-      };
+    for (const beforePage of beforePages) {
+      const matched = this.findSequenceMapEntry(beforePage.route);
+      if (!matched) {
+        continue;
+      }
+      const [, rule] = matched;
+      if (rule.isBlocked(input.readiness)) {
+        return {
+          check: {
+            id: 'sequence_order' as const,
+            status: 'failed' as ReasoningCheckStatus,
+            detail: input.locale === 'sw' ? rule.detailSw : rule.detailEn,
+          },
+          blocker: {
+            type: 'sequence_violation' as const,
+            message: input.locale === 'sw' ? rule.messageSw : rule.messageEn,
+            actions: input.locale === 'sw' ? rule.actionsSw : rule.actionsEn,
+          },
+          blockingRoute: beforePage.route,
+        };
+      }
     }
 
     return {
@@ -563,7 +620,57 @@ export class SupportChatReasonerService {
             : 'No active sequence violation was detected from readiness signals.',
       },
       blocker: null,
+      blockingRoute: null,
     };
+  }
+
+  private findSequenceMapEntry(
+    route: string,
+  ): [string, (typeof this.SEQUENCE_READINESS_MAP)[string]] | null {
+    for (const [pattern, rule] of Object.entries(this.SEQUENCE_READINESS_MAP)) {
+      if (route.includes(pattern)) {
+        return [pattern, rule];
+      }
+    }
+    return null;
+  }
+
+  private traverseDependencyChain(
+    locale: ManualLocale,
+    blockingRoute: string,
+    readiness: Record<string, unknown>,
+    depth: number,
+  ): DependencyChainLink[] {
+    if (depth >= 3) {
+      return [];
+    }
+    const normalizedRoute = this.normalizeRoute(blockingRoute);
+    const entry = this.getEntryByRoute(locale, normalizedRoute);
+    if (!entry) {
+      return [];
+    }
+    const beforePages = (entry.related_pages ?? []).filter(
+      (item) => item.order?.toLowerCase() === 'before',
+    );
+    for (const beforePage of beforePages) {
+      const matched = this.findSequenceMapEntry(beforePage.route);
+      if (!matched) {
+        continue;
+      }
+      const [, rule] = matched;
+      if (rule.isBlocked(readiness)) {
+        const link: DependencyChainLink = {
+          page_route: beforePage.route,
+          blocker_message: locale === 'sw' ? rule.messageSw : rule.messageEn,
+          actions: locale === 'sw' ? rule.actionsSw : rule.actionsEn,
+        };
+        return [
+          link,
+          ...this.traverseDependencyChain(locale, beforePage.route, readiness, depth + 1),
+        ];
+      }
+    }
+    return [];
   }
 
   private evaluatePermissions(input: {

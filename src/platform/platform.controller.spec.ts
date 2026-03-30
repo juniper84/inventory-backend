@@ -69,6 +69,7 @@ describe('PlatformController', () => {
       authService as any,
       platformService as any,
       supportAccessService as any,
+      { createStream: jest.fn() } as any,
     );
   });
 

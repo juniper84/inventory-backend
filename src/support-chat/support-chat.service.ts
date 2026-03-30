@@ -1,6 +1,8 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -188,7 +190,9 @@ type ErrorContextResolution = {
 };
 
 @Injectable()
-export class SupportChatService {
+export class SupportChatService implements OnModuleInit {
+  private readonly logger = new Logger(SupportChatService.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly playbookService: SupportChatPlaybookService,
@@ -204,6 +208,24 @@ export class SupportChatService {
         chunks: RetrievalChunk[];
       }
     | null = null;
+
+  async onModuleInit() {
+    if (!this.config.get<boolean>('supportChat.enabled')) return;
+    if (!this.config.get<boolean>('supportChat.vectorEnabled')) return;
+    const openai = this.getOpenAiClient();
+    const pool = this.getPgPool();
+    if (!openai || !pool) return;
+    try {
+      const needs = await this.checkNeedsReindex(pool);
+      if (needs) {
+        this.logger.log('Manual files updated — running auto re-index...');
+        await this.runVectorIndex(openai, pool);
+        this.logger.log('Auto re-index complete.');
+      }
+    } catch (err) {
+      this.logger.warn(`Auto re-index check failed: ${String(err)}`);
+    }
+  }
 
   async chat(input: ChatInput) {
     if (!this.config.get<boolean>('supportChat.enabled')) {
@@ -1173,5 +1195,91 @@ export class SupportChatService {
     }
     this.pool = new Pool({ connectionString });
     return this.pool;
+  }
+
+  private async checkNeedsReindex(pool: Pool): Promise<boolean> {
+    const sourceDir =
+      this.config.get<string>('supportChat.manualSourceDir') ?? 'frontend/docs/manual';
+    const enPath = this.resolveFilePath(path.join(sourceDir, 'manual.en.json'));
+    const swPath = this.resolveFilePath(path.join(sourceDir, 'manual.sw.json'));
+    if (!enPath || !fs.existsSync(enPath) || !swPath || !fs.existsSync(swPath)) {
+      return false;
+    }
+    const latestMtime = Math.max(
+      fs.statSync(enPath).mtimeMs,
+      fs.statSync(swPath).mtimeMs,
+    );
+    try {
+      const result = await pool.query<{ max_updated: Date | null }>(
+        'SELECT MAX("updatedAt") AS max_updated FROM "SupportChatManualEmbedding"',
+      );
+      const lastIndexed = result.rows[0]?.max_updated;
+      if (!lastIndexed) return true;
+      return latestMtime > new Date(lastIndexed).getTime();
+    } catch {
+      return true;
+    }
+  }
+
+  private async runVectorIndex(openai: OpenAI, pool: Pool): Promise<void> {
+    const chunks = this.loadChunks();
+    const embeddingModel =
+      this.config.get<string>('supportChat.embeddingModel') ??
+      process.env.OPENAI_EMBEDDING_MODEL ??
+      'text-embedding-3-small';
+    const batchSize = 32;
+    let upserted = 0;
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+      const embeddingResponse = await openai.embeddings.create({
+        model: embeddingModel,
+        input: batch.map((item) => item.text),
+      });
+      for (let j = 0; j < batch.length; j += 1) {
+        const chunk = batch[j];
+        const vector = embeddingResponse.data[j]?.embedding;
+        if (!vector?.length) continue;
+        const sql = `
+          INSERT INTO "SupportChatManualEmbedding" (
+            "chunkId", "entryId", "route", "module", "locale", "section",
+            "title", "source", "errorCodes", "content", "embedding", "updatedAt"
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10, $11::vector, NOW()
+          )
+          ON CONFLICT ("chunkId")
+          DO UPDATE SET
+            "entryId" = EXCLUDED."entryId",
+            "route" = EXCLUDED."route",
+            "module" = EXCLUDED."module",
+            "locale" = EXCLUDED."locale",
+            "section" = EXCLUDED."section",
+            "title" = EXCLUDED."title",
+            "source" = EXCLUDED."source",
+            "errorCodes" = EXCLUDED."errorCodes",
+            "content" = EXCLUDED."content",
+            "embedding" = EXCLUDED."embedding",
+            "updatedAt" = NOW()
+        `;
+        await pool.query(sql, [
+          chunk.chunk_id,
+          chunk.id,
+          chunk.route,
+          chunk.module,
+          chunk.locale,
+          chunk.section,
+          chunk.title,
+          chunk.source,
+          chunk.error_codes,
+          chunk.text,
+          this.toVectorLiteral(vector),
+        ]);
+        upserted += 1;
+      }
+      this.logger.log(
+        `[reindex] ${Math.min(i + batchSize, chunks.length)}/${chunks.length} chunks processed`,
+      );
+    }
+    this.logger.log(`[reindex] done. chunks=${chunks.length} upserted=${upserted}`);
   }
 }

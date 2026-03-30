@@ -112,15 +112,6 @@ export class ReportsService {
         branch: { select: { name: true } },
       },
     });
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_STOCK',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Stock report' },
-    });
     return data.map((row) => ({
       ...row,
       variantName: row.variant?.name ?? null,
@@ -150,15 +141,6 @@ export class ReportsService {
         ...(dateFilter ? { createdAt: dateFilter } : {}),
       },
     });
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_SALES',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Sales report' },
-    });
     return data;
   }
 
@@ -184,15 +166,6 @@ export class ReportsService {
           ...(dateFilter ? { createdAt: dateFilter } : {}),
         },
       },
-    });
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_VAT',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'VAT report' },
     });
     return data;
   }
@@ -235,15 +208,6 @@ export class ReportsService {
       byRate.set(rate, (byRate.get(rate) ?? 0) + amount);
       const dayKey = this.toDayKey(line.sale.createdAt);
       byDay.set(dayKey, (byDay.get(dayKey) ?? 0) + amount);
-    });
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_VAT_SUMMARY',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'VAT summary report' },
     });
     return {
       totalVat,
@@ -303,7 +267,11 @@ export class ReportsService {
         revenue: number;
         cost: number;
         grossProfit: number;
+        refunds: number;
         losses: number;
+        adjustmentGains: number;
+        stockCountShortages: number;
+        stockCountSurpluses: number;
         expenses: number;
         transferFees: number;
         netProfit: number;
@@ -315,7 +283,11 @@ export class ReportsService {
           revenue: 0,
           cost: 0,
           grossProfit: 0,
+          refunds: 0,
           losses: 0,
+          adjustmentGains: 0,
+          stockCountShortages: 0,
+          stockCountSurpluses: 0,
           expenses: 0,
           transferFees: 0,
           netProfit: 0,
@@ -335,6 +307,48 @@ export class ReportsService {
       bucket.revenue += revenue;
       bucket.cost += cost;
       bucket.grossProfit += revenue - cost;
+    });
+
+    // Refunds: subtract refunded revenue and reverse refunded cost
+    const refundLines = await this.prisma.saleRefundLine.findMany({
+      where: {
+        refund: {
+          businessId,
+          status: 'COMPLETED',
+          ...branchFilter,
+          ...(dateFilter ? { createdAt: dateFilter } : {}),
+        },
+      },
+      include: {
+        variant: { select: { defaultCost: true } },
+        refund: { select: { createdAt: true } },
+      },
+    });
+    const refundTotals = refundLines.reduce(
+      (acc, line) => {
+        const refundRevenue = Number(line.lineTotal);
+        const unitCost = Number(line.variant.defaultCost ?? 0);
+        const refundCost = unitCost * Number(line.quantity);
+        acc.revenue += refundRevenue;
+        acc.cost += refundCost;
+        return acc;
+      },
+      { revenue: 0, cost: 0 },
+    );
+    totals.revenue -= refundTotals.revenue;
+    totals.cost -= refundTotals.cost;
+    totals.grossProfit = totals.revenue - totals.cost;
+
+    refundLines.forEach((line) => {
+      const dayKey = this.toDayKey(line.refund.createdAt);
+      const bucket = ensureDay(dayKey);
+      const refundRevenue = Number(line.lineTotal);
+      const unitCost = Number(line.variant.defaultCost ?? 0);
+      const refundCost = unitCost * Number(line.quantity);
+      bucket.refunds += refundRevenue;
+      bucket.revenue -= refundRevenue;
+      bucket.cost -= refundCost;
+      bucket.grossProfit = bucket.revenue - bucket.cost;
     });
 
     const lossTotals = await this.prisma.lossEntry.aggregate({
@@ -358,6 +372,55 @@ export class ReportsService {
       const dayKey = this.toDayKey(entry.createdAt);
       const bucket = ensureDay(dayKey);
       bucket.losses += Number(entry.totalCost ?? 0);
+    });
+
+    // Gain entries from positive stock adjustments
+    const gainTotals = await this.prisma.gainEntry.aggregate({
+      where: {
+        businessId,
+        ...branchFilter,
+        ...(dateFilter ? { createdAt: dateFilter } : {}),
+      },
+      _sum: { totalCost: true },
+    });
+
+    const gainEntries = await this.prisma.gainEntry.findMany({
+      where: {
+        businessId,
+        ...branchFilter,
+        ...(dateFilter ? { createdAt: dateFilter } : {}),
+      },
+      select: { totalCost: true, createdAt: true },
+    });
+    gainEntries.forEach((entry) => {
+      const dayKey = this.toDayKey(entry.createdAt);
+      const bucket = ensureDay(dayKey);
+      bucket.adjustmentGains += Number(entry.totalCost ?? 0);
+    });
+
+    // Stock count variance costs (shortages and surpluses)
+    const varianceCostEntries = await this.prisma.stockCountVarianceCost.findMany({
+      where: {
+        businessId,
+        ...branchFilter,
+        ...(dateFilter ? { createdAt: dateFilter } : {}),
+      },
+      select: { totalCost: true, varianceType: true, createdAt: true },
+    });
+
+    let stockCountShortagesTotal = 0;
+    let stockCountSurplusesTotal = 0;
+    varianceCostEntries.forEach((entry) => {
+      const dayKey = this.toDayKey(entry.createdAt);
+      const bucket = ensureDay(dayKey);
+      const cost = Number(entry.totalCost ?? 0);
+      if (entry.varianceType === 'SHORTAGE') {
+        stockCountShortagesTotal += cost;
+        bucket.stockCountShortages += cost;
+      } else {
+        stockCountSurplusesTotal += cost;
+        bucket.stockCountSurpluses += cost;
+      }
     });
 
     const expenseTotals = await this.prisma.expense.aggregate({
@@ -403,23 +466,26 @@ export class ReportsService {
       bucket.netProfit =
         bucket.grossProfit -
         bucket.losses -
+        bucket.stockCountShortages +
+        bucket.adjustmentGains +
+        bucket.stockCountSurpluses -
         bucket.expenses -
         bucket.transferFees;
     });
 
+    const refunds = refundTotals.revenue;
     const losses = Number(lossTotals._sum.totalCost ?? 0);
+    const adjustmentGains = Number(gainTotals._sum.totalCost ?? 0);
     const expenses = Number(expenseTotals._sum.amount ?? 0);
     const transferFees = Number(transferFeeTotals._sum.amount ?? 0);
-    const netProfit = totals.grossProfit - losses - expenses - transferFees;
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_PNL',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'P&L report' },
-    });
+    const netProfit =
+      totals.grossProfit -
+      losses -
+      stockCountShortagesTotal +
+      adjustmentGains +
+      stockCountSurplusesTotal -
+      expenses -
+      transferFees;
     return {
       lines: data,
       byDay: Array.from(byDayMap.entries())
@@ -427,7 +493,11 @@ export class ReportsService {
         .map(([date, totals]) => ({ date, ...totals })),
       totals: {
         ...totals,
+        refunds,
         losses,
+        adjustmentGains,
+        stockCountShortages: stockCountShortagesTotal,
+        stockCountSurpluses: stockCountSurplusesTotal,
         expenses,
         transferFees,
         netProfit,
@@ -476,15 +546,6 @@ export class ReportsService {
       total: row._sum.total ?? 0,
       count: row._count.id ?? 0,
     }));
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_CUSTOMER_SALES',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Customer sales report' },
-    });
     return enriched;
   }
 
@@ -528,15 +589,6 @@ export class ReportsService {
       total: row._sum.total ?? 0,
       count: row._count.id ?? 0,
     }));
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_CUSTOMER_REFUNDS',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Customer refunds report' },
-    });
     return enriched;
   }
 
@@ -565,15 +617,6 @@ export class ReportsService {
         creditDueDate: true,
       },
       orderBy: { outstandingAmount: 'desc' },
-    });
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_CUSTOMER_OUTSTANDING',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Customer outstanding report' },
     });
     return data;
   }
@@ -616,15 +659,6 @@ export class ReportsService {
       total: row._sum.total ?? 0,
       count: row._count.id ?? 0,
     }));
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_CUSTOMER_TOP',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Top customers report' },
-    });
     return enriched;
   }
 
@@ -676,15 +710,6 @@ export class ReportsService {
         variant: { include: { product: { select: { name: true } } } },
         branch: true,
       },
-    });
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_LOW_STOCK',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Low stock report' },
     });
     return data;
   }
@@ -765,15 +790,6 @@ export class ReportsService {
         }),
       );
     }
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_EXPIRY',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Expiry report' },
-    });
     return data;
   }
 
@@ -808,6 +824,25 @@ export class ReportsService {
       this.getBranchLookup(businessId, branchIds),
     ]);
 
+    // Fetch variance cost records for financial data
+    const movementIds = logs
+      .map((log) => log.resourceId)
+      .filter((id): id is string => Boolean(id));
+    const varianceCosts = movementIds.length
+      ? await this.prisma.stockCountVarianceCost.findMany({
+          where: { stockMovementId: { in: movementIds } },
+          select: {
+            stockMovementId: true,
+            unitCost: true,
+            totalCost: true,
+            varianceType: true,
+          },
+        })
+      : [];
+    const varianceCostMap = new Map(
+      varianceCosts.map((vc) => [vc.stockMovementId, vc]),
+    );
+
     const rows = logs.map((log) => {
       const meta =
         (log.metadata as {
@@ -826,6 +861,9 @@ export class ReportsService {
       const branchName = log.branchId
         ? (branchLookup.get(log.branchId)?.name ?? null)
         : null;
+      const costRecord = log.resourceId
+        ? varianceCostMap.get(log.resourceId) ?? null
+        : null;
       return {
         id: log.id,
         branchId: log.branchId,
@@ -839,17 +877,10 @@ export class ReportsService {
         reason: log.reason ?? null,
         createdAt: log.createdAt,
         userId: log.userId ?? null,
+        unitCost: costRecord ? Number(costRecord.unitCost) : null,
+        totalCost: costRecord ? Number(costRecord.totalCost) : null,
+        varianceType: costRecord?.varianceType ?? null,
       };
-    });
-
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_STOCK_COUNT_VARIANCE',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Stock count variance report' },
     });
 
     return rows;
@@ -886,15 +917,6 @@ export class ReportsService {
       .map((row) => row.cashierId)
       .filter((id): id is string => Boolean(id));
     const userLookup = await this.getUserLookup(businessId, cashierIds);
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_STAFF_PERFORMANCE',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Staff performance report' },
-    });
     return data.map((row) => ({
       ...row,
       cashierName: row.cashierId
@@ -947,15 +969,6 @@ export class ReportsService {
     const variantLookup = new Map(
       variants.map((variant) => [variant.id, variant]),
     );
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_TOP_LOSSES',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Top losses report', days: safeDays },
-    });
     return {
       days: safeDays,
       items: grouped.map((row) => {
@@ -1023,16 +1036,6 @@ export class ReportsService {
     });
     const variantLookup = new Map(variants.map((variant) => [variant.id, variant]));
 
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_TOP_PRODUCTS',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Top products report' },
-    });
-
     return {
       items: grouped.map((row) => {
         const variant = variantLookup.get(row.variantId);
@@ -1086,16 +1089,6 @@ export class ReportsService {
       0,
     );
 
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_SALES_BY_BRANCH',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Sales by branch report' },
-    });
-
     return {
       total,
       items: grouped.map((row) => ({
@@ -1146,16 +1139,6 @@ export class ReportsService {
       (sum, row) => sum + Number(row._sum.amount ?? 0),
       0,
     );
-
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_EXPENSE_BREAKDOWN',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Expense breakdown report' },
-    });
 
     return {
       total,
@@ -1268,16 +1251,6 @@ export class ReportsService {
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .slice(0, take);
 
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_RECENT_ACTIVITY',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Recent activity report' },
-    });
-
     return { items: combined };
   }
 
@@ -1307,16 +1280,6 @@ export class ReportsService {
       );
       return sum + Number(row.quantity ?? 0) * unit;
     }, 0);
-
-    await this.auditService.logEvent({
-      businessId,
-      userId,
-      branchId: filters?.branchId,
-      action: 'REPORT_STOCK_VALUE',
-      resourceType: 'Report',
-      outcome: 'SUCCESS',
-      metadata: { resourceName: 'Stock value report' },
-    });
 
     return {
       stockValue,

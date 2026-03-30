@@ -85,8 +85,6 @@ const resolveLogoUrl = (content: BrandedEmailContent) => {
 };
 
 export const buildBrandedEmail = (content: BrandedEmailContent) => {
-  const logoUrl = resolveLogoUrl(content);
-  const logo = logoUrl || getLogoDataUri();
   const brandName = content.brandName ?? 'New Vision Inventory';
   const bodyHtml = renderBody(content.body);
   const supportLine = content.supportLine
@@ -138,18 +136,8 @@ export const buildBrandedEmail = (content: BrandedEmailContent) => {
           <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="width:640px;max-width:92%;background:#121212;border:1px solid #2B220F;border-radius:12px;overflow:hidden;">
             <tr>
               <td align="center" style="padding:28px 24px 16px;background:radial-gradient(circle at top,#1E1B10 0%,#121212 70%);">
-                ${
-                  logo
-                    ? `<img src="${logo}" alt="${escapeHtml(
-                        brandName,
-                      )}" width="120" height="120" style="display:block;border-radius:12px;" />`
-                    : `<div style="font-size:20px;font-weight:700;color:#D4AF37;">${escapeHtml(
-                        brandName,
-                      )}</div>`
-                }
-                <p style="margin:12px 0 0;color:#D4AF37;letter-spacing:0.2em;text-transform:uppercase;font-size:11px;">
-                  ${escapeHtml(brandName)}
-                </p>
+                <p style="margin:0 0 4px;font-size:10px;color:#a4905c;letter-spacing:0.20em;text-transform:uppercase;">Powered by</p>
+                <p style="margin:0;font-size:22px;font-weight:600;color:#D4AF37;font-family:Georgia,'Times New Roman',serif;letter-spacing:0.06em;">${escapeHtml(brandName)}</p>
               </td>
             </tr>
             <tr>

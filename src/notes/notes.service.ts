@@ -344,6 +344,7 @@ export class NotesService {
       resourceType: 'Note',
       resourceId: created.id,
       outcome: 'SUCCESS',
+      metadata: { title: created.title },
       after: created as unknown as Record<string, unknown>,
     });
 
@@ -430,6 +431,7 @@ export class NotesService {
       resourceType: 'Note',
       resourceId: updated.id,
       outcome: 'SUCCESS',
+      metadata: { title: updated.title },
       before: existing as unknown as Record<string, unknown>,
       after: updated as unknown as Record<string, unknown>,
     });
@@ -463,6 +465,7 @@ export class NotesService {
       resourceType: 'Note',
       resourceId: updated.id,
       outcome: 'SUCCESS',
+      metadata: { title: existing.title },
       before: existing as unknown as Record<string, unknown>,
       after: updated as unknown as Record<string, unknown>,
     });
@@ -604,7 +607,7 @@ export class NotesService {
       resourceType: 'Note',
       resourceId: noteId,
       outcome: 'SUCCESS',
-      metadata: { channels, scheduledAt: scheduledAt.toISOString() },
+      metadata: { title: note.title, channels, scheduledAt: scheduledAt.toISOString() },
     });
 
     return reminders;
@@ -632,6 +635,7 @@ export class NotesService {
       resourceType: 'NoteReminder',
       resourceId: reminderId,
       outcome: 'SUCCESS',
+      metadata: { title: reminder.note.title },
     });
     return updated;
   }

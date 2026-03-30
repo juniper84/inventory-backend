@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -30,10 +32,17 @@ const SUPPORT_PERMISSIONS = [
   PermissionsList.SALES_READ,
   PermissionsList.PURCHASES_READ,
   PermissionsList.SUPPLIERS_READ,
+  PermissionsList.EXPENSES_READ,
   PermissionsList.REPORTS_READ,
+  PermissionsList.AUDIT_READ,
   PermissionsList.OFFLINE_READ,
+  PermissionsList.ATTACHMENTS_READ,
+  PermissionsList.CUSTOMERS_VIEW,
   PermissionsList.SETTINGS_READ,
   PermissionsList.NOTIFICATIONS_READ,
+  PermissionsList.NOTES_READ,
+  PermissionsList.APPROVALS_READ,
+  PermissionsList.SEARCH_READ,
 ];
 
 const SUPPORT_SCOPE_PERMISSIONS: Record<string, string[]> = {
@@ -46,10 +55,17 @@ const SUPPORT_SCOPE_PERMISSIONS: Record<string, string[]> = {
   sales: [PermissionsList.SALES_READ],
   purchases: [PermissionsList.PURCHASES_READ],
   suppliers: [PermissionsList.SUPPLIERS_READ],
+  expenses: [PermissionsList.EXPENSES_READ],
   reports: [PermissionsList.REPORTS_READ],
+  audit: [PermissionsList.AUDIT_READ],
   offline: [PermissionsList.OFFLINE_READ],
+  attachments: [PermissionsList.ATTACHMENTS_READ],
+  customers: [PermissionsList.CUSTOMERS_VIEW],
   settings: [PermissionsList.SETTINGS_READ],
   notifications: [PermissionsList.NOTIFICATIONS_READ],
+  notes: [PermissionsList.NOTES_READ],
+  approvals: [PermissionsList.APPROVALS_READ],
+  search: [PermissionsList.SEARCH_READ],
 };
 
 @Injectable()
@@ -117,9 +133,7 @@ export class AuthService {
         .filter(
           (membership) =>
             membership.business &&
-            !['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(
-              membership.business.status,
-            ),
+            !['ARCHIVED', 'DELETED'].includes(membership.business.status),
         )
         .map((membership) => ({
           businessId: membership.businessId,
@@ -129,6 +143,19 @@ export class AuthService {
 
       if (!available.length) {
         throw new UnauthorizedException('User is not active for any business.');
+      }
+
+      const activeAvailable = available.filter((b) => b.status !== 'SUSPENDED');
+
+      if (!activeAvailable.length) {
+        throw new HttpException(
+          {
+            message: 'Business is not active.',
+            errorCode: 'BUSINESS_SUSPENDED',
+            statusCode: 403,
+          },
+          HttpStatus.FORBIDDEN,
+        );
       }
 
       if (available.length > 1) {
@@ -143,7 +170,7 @@ export class AuthService {
         };
       }
 
-      resolvedBusinessId = available[0].businessId;
+      resolvedBusinessId = activeAvailable[0].businessId;
     }
 
     const membership = await this.prisma.businessUser.findUnique({
@@ -160,11 +187,19 @@ export class AuthService {
       where: { id: resolvedBusinessId },
     });
 
-    if (
-      !business ||
-      ['SUSPENDED', 'ARCHIVED', 'DELETED'].includes(business.status)
-    ) {
+    if (!business || ['ARCHIVED', 'DELETED'].includes(business.status)) {
       throw new UnauthorizedException('Business is not active.');
+    }
+
+    if (business.status === 'SUSPENDED') {
+      throw new HttpException(
+        {
+          message: 'Business is not active.',
+          errorCode: 'BUSINESS_SUSPENDED',
+          statusCode: 403,
+        },
+        HttpStatus.FORBIDDEN,
+      );
     }
 
     const access = await this.rbacService.resolveUserAccess(
@@ -1043,10 +1078,26 @@ export class AuthService {
     // by short-lived access tokens, token rotation on each refresh, and reuse detection.
     const tokenHash = this.hashToken(refreshToken);
     const stored = await this.prisma.platformAdminRefreshToken.findFirst({
-      where: { tokenHash, revokedAt: null },
+      where: { tokenHash },
     });
 
-    if (!stored || stored.expiresAt < new Date()) {
+    if (!stored) {
+      throw new UnauthorizedException('Refresh token expired or invalid.');
+    }
+
+    // Reuse detection: a previously-rotated token being presented again means
+    // the token was stolen. Revoke all active sessions for this admin immediately.
+    if (stored.revokedAt !== null) {
+      await this.prisma.platformAdminRefreshToken.updateMany({
+        where: { platformAdminId: stored.platformAdminId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      throw new UnauthorizedException(
+        'Refresh token already used. All sessions revoked for security.',
+      );
+    }
+
+    if (stored.expiresAt < new Date()) {
       throw new UnauthorizedException('Refresh token expired or invalid.');
     }
 
@@ -1139,7 +1190,13 @@ export class AuthService {
       supportScope: scopeList.length ? scopeList : undefined,
     };
 
-    const accessToken = await this.jwtService.signAsync(payload);
+    const secondsUntilExpiry = Math.max(
+      60,
+      Math.floor((new Date(session.expiresAt).getTime() - Date.now()) / 1000),
+    );
+    const accessToken = await this.jwtService.signAsync(payload, {
+      expiresIn: secondsUntilExpiry,
+    });
     return {
       accessToken,
       businessId: session.businessId,

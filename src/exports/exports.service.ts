@@ -9,6 +9,7 @@ import { ExportJobStatus, ExportJobType, Prisma } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { toCsv } from '../common/csv';
+import { PlatformEventService } from '../platform/platform-event.service';
 import { StorageService } from '../storage/storage.service';
 import {
   buildPaginatedResponse,
@@ -24,6 +25,7 @@ export class ExportsService {
     private readonly auditService: AuditService,
     private readonly storageService: StorageService,
     private readonly configService: ConfigService,
+    private readonly platformEvents: PlatformEventService,
   ) {}
 
   private serializeValue(value: unknown) {
@@ -901,6 +903,12 @@ export class ExportsService {
         outcome: 'FAILURE',
         reason: message,
         metadata: { type: job.type },
+      });
+      this.platformEvents.emit('export.failed', {
+        exportJobId: job.id,
+        businessId: job.businessId,
+        type: job.type,
+        error: message,
       });
       return updated;
     }

@@ -73,6 +73,7 @@ async function main() {
     auditService,
     storageService,
     configService,
+    { emit: () => {} } as any,
   );
   const importsService = new ImportsService(prisma, auditService);
 

@@ -75,6 +75,7 @@ export class TransfersService {
       feeAmount: Prisma.Decimal | null;
       feeCurrency: string | null;
       sourceBranchId: string;
+      destinationBranchId: string;
       businessId: string;
     },
     userId: string,
@@ -87,6 +88,11 @@ export class TransfersService {
       (transfer.feeCurrency ?? '').trim().toUpperCase() ||
       (await this.getCurrency(transfer.businessId));
     const db = tx ?? this.prisma;
+    const [srcBranch, dstBranch] = await Promise.all([
+      db.branch.findUnique({ where: { id: transfer.sourceBranchId }, select: { name: true } }),
+      db.branch.findUnique({ where: { id: transfer.destinationBranchId }, select: { name: true } }),
+    ]);
+    const noteLabel = `Transfer fee: ${srcBranch?.name ?? 'Source'} → ${dstBranch?.name ?? 'Destination'}`;
     const expense = await db.expense.create({
       data: {
         businessId: transfer.businessId,
@@ -94,7 +100,7 @@ export class TransfersService {
         category: 'TRANSFER_FEE',
         amount: transfer.feeAmount,
         currency,
-        note: `Transfer fee for ${transfer.id}`,
+        note: noteLabel,
         transferId: transfer.id,
         createdBy: userId,
       },
@@ -107,7 +113,7 @@ export class TransfersService {
       resourceId: expense.id,
       outcome: 'SUCCESS',
       metadata: {
-        resourceName: `Transfer fee for ${transfer.id}`,
+        resourceName: noteLabel,
         transferId: transfer.id,
         amount: transfer.feeAmount,
         currency,
@@ -178,7 +184,11 @@ export class TransfersService {
           destinationBranch: true,
           items: {
             include: {
-              variant: true,
+              variant: {
+                include: {
+                  baseUnit: { select: { id: true, label: true, code: true } },
+                },
+              },
               batch: true,
             },
           },
@@ -525,6 +535,7 @@ export class TransfersService {
           feeAmount: refreshed.feeAmount,
           feeCurrency: refreshed.feeCurrency,
           sourceBranchId: refreshed.sourceBranchId,
+          destinationBranchId: refreshed.destinationBranchId,
           businessId,
         },
         userId,

@@ -13,6 +13,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationStreamService } from '../notifications/notification-stream.service';
+import { MailerService } from '../mailer/mailer.service';
+import { buildBrandedEmail } from '../mailer/email-templates';
+import { PlatformEventService } from './platform-event.service';
 import {
   hashPassword,
   validatePassword,
@@ -153,6 +156,8 @@ export class PlatformService {
     private readonly notificationsService: NotificationsService,
     private readonly notificationStream: NotificationStreamService,
     private readonly configService: ConfigService,
+    private readonly platformEvents: PlatformEventService,
+    private readonly mailerService: MailerService,
   ) {}
 
   private async logPlatformAction(data: {
@@ -359,29 +364,30 @@ export class PlatformService {
   ) {
     const pagination = parsePagination(query);
     const search = query.search?.trim();
+    const where = {
+      ...(query.status ? { status: query.status as BusinessStatus } : {}),
+      ...(search
+        ? {
+            OR: [
+              {
+                name: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+              {
+                id: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+            ],
+          }
+        : {}),
+    };
     return this.prisma.business
       .findMany({
-        where: {
-          ...(query.status ? { status: query.status as BusinessStatus } : {}),
-          ...(search
-            ? {
-                OR: [
-                  {
-                    name: {
-                      contains: search,
-                      mode: Prisma.QueryMode.insensitive,
-                    },
-                  },
-                  {
-                    id: {
-                      contains: search,
-                      mode: Prisma.QueryMode.insensitive,
-                    },
-                  },
-                ],
-              }
-            : {}),
-        },
+        where,
         include: {
           subscription: true,
           settings: { select: { readOnlyEnabled: true, readOnlyReason: true } },
@@ -398,15 +404,56 @@ export class PlatformService {
       })
       .then(async (items) => {
         const businessIds = items.map((business) => business.id);
-        const activeOfflineCounts = businessIds.length
-          ? await this.prisma.offlineDevice.groupBy({
-              by: ['businessId'],
-              where: { businessId: { in: businessIds }, status: 'ACTIVE' },
-              _count: { _all: true },
+        const [activeOfflineCounts, total, systemOwnerRoles] = await Promise.all([
+          businessIds.length
+            ? this.prisma.offlineDevice.groupBy({
+                by: ['businessId'],
+                where: { businessId: { in: businessIds }, status: 'ACTIVE' },
+                _count: { _all: true },
+              })
+            : Promise.resolve([]),
+          this.prisma.business.count({ where }),
+          businessIds.length
+            ? this.prisma.role.findMany({
+                where: { businessId: { in: businessIds }, name: 'System Owner', isSystem: true },
+                select: { id: true, businessId: true },
+              })
+            : Promise.resolve([]),
+        ]);
+
+        const roleToBusinessMap = new Map<string, string>(
+          systemOwnerRoles.map((r): [string, string] => [r.id, r.businessId]),
+        );
+        const systemOwnerRoleIds = systemOwnerRoles.map((r) => r.id);
+        const systemOwnerUserRoles = systemOwnerRoleIds.length
+          ? await this.prisma.userRole.findMany({
+              where: { roleId: { in: systemOwnerRoleIds } },
+              select: { roleId: true, userId: true },
             })
           : [];
+
+        const ownerUserIds = [...new Set(systemOwnerUserRoles.map((ur) => ur.userId))];
+        const ownerUsers = ownerUserIds.length
+          ? await this.prisma.user.findMany({
+              where: { id: { in: ownerUserIds } },
+              select: { id: true, name: true, email: true, phone: true },
+            })
+          : [];
+        const ownerUserMap = new Map(ownerUsers.map((u): [string, typeof u] => [u.id, u]));
+
+        const businessOwnerMap = new Map<string, { name: string; email: string; phone: string | null }>();
+        for (const ur of systemOwnerUserRoles) {
+          const bizId = roleToBusinessMap.get(ur.roleId);
+          if (bizId && !businessOwnerMap.has(bizId)) {
+            const owner = ownerUserMap.get(ur.userId);
+            if (owner) {
+              businessOwnerMap.set(bizId, { name: owner.name, email: owner.email, phone: owner.phone ?? null });
+            }
+          }
+        }
+
         const activeCountMap = new Map(
-          activeOfflineCounts.map((row) => [row.businessId, row._count._all]),
+          activeOfflineCounts.map((row): [string, number] => [row.businessId, row._count._all]),
         );
         const enriched = items.map((business) => {
           const lastActivity = business.lastActivityAt
@@ -420,9 +467,10 @@ export class PlatformService {
               offlineDevices: activeCountMap.get(business.id) ?? 0,
             },
             lastActivityAt: lastActivity,
+            systemOwner: businessOwnerMap.get(business.id) ?? null,
           };
         });
-        return buildPaginatedResponse(enriched, pagination.take);
+        return buildPaginatedResponse(enriched, pagination.take, total);
       });
   }
 
@@ -466,7 +514,7 @@ export class PlatformService {
       .then((items) => buildPaginatedResponse(items, pagination.take));
   }
 
-  listPlatformAuditLogs(
+  async listPlatformAuditLogs(
     query: PaginationQuery & {
       action?: string;
       resourceType?: string;
@@ -475,20 +523,35 @@ export class PlatformService {
     } = {},
   ) {
     const pagination = parsePagination(query, 50, 200);
-    return this.prisma.platformAuditLog
-      .findMany({
-        where: {
-          ...(query.action ? { action: query.action } : {}),
-          ...(query.resourceType ? { resourceType: query.resourceType } : {}),
-          ...(query.resourceId ? { resourceId: query.resourceId } : {}),
-          ...(query.platformAdminId
-            ? { platformAdminId: query.platformAdminId }
-            : {}),
-        },
-        orderBy: { createdAt: 'desc' },
-        ...pagination,
-      })
-      .then((items) => buildPaginatedResponse(items, pagination.take));
+    const items = await this.prisma.platformAuditLog.findMany({
+      where: {
+        ...(query.action ? { action: query.action } : {}),
+        ...(query.resourceType ? { resourceType: query.resourceType } : {}),
+        ...(query.resourceId ? { resourceId: query.resourceId } : {}),
+        ...(query.platformAdminId
+          ? { platformAdminId: query.platformAdminId }
+          : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      ...pagination,
+    });
+
+    // Enrich with platform admin email (PlatformAuditLog has no FK relation to PlatformAdmin)
+    const adminIds = [...new Set(items.map((l) => l.platformAdminId).filter(Boolean))] as string[];
+    const admins = adminIds.length
+      ? await this.prisma.platformAdmin.findMany({
+          where: { id: { in: adminIds } },
+          select: { id: true, email: true },
+        })
+      : [];
+    const adminEmailMap = new Map(admins.map((a) => [a.id, a.email]));
+
+    const enriched = items.map((log) => ({
+      ...log,
+      adminEmail: log.platformAdminId ? (adminEmailMap.get(log.platformAdminId) ?? null) : null,
+    }));
+
+    return buildPaginatedResponse(enriched, pagination.take);
   }
 
   private async buildQueuesSummary(): Promise<QueueSummary> {
@@ -1213,7 +1276,10 @@ export class PlatformService {
       async (tx) => {
         const business = await tx.business.update({
           where: { id: businessId },
-          data: { status },
+          data: {
+            status,
+            suspensionReason: status === BusinessStatus.SUSPENDED ? (reason ?? null) : null,
+          },
         });
         let revokedCount = 0;
         if (archivedStatuses.has(status)) {
@@ -1270,7 +1336,65 @@ export class PlatformService {
         metadata: { action: 'BUSINESS_STATUS_UPDATE', status },
       });
     }
+
+    if (status === BusinessStatus.SUSPENDED) {
+      // Fire-and-forget: email only the System Owner about the suspension reason
+      this.sendSuspensionEmailToSystemOwner(businessId, before.name, reason ?? '').catch(
+        () => undefined,
+      );
+    }
+
     return updated;
+  }
+
+  private async sendSuspensionEmailToSystemOwner(
+    businessId: string,
+    businessName: string,
+    reason: string,
+  ) {
+    const systemOwnerRoles = await this.prisma.role.findMany({
+      where: { businessId, name: 'System Owner', isSystem: true },
+      select: { id: true },
+    });
+    if (!systemOwnerRoles.length) {
+      return;
+    }
+    const roleIds = systemOwnerRoles.map((r) => r.id);
+    const userRoles = await this.prisma.userRole.findMany({
+      where: { roleId: { in: roleIds } },
+      select: { userId: true },
+    });
+    if (!userRoles.length) {
+      return;
+    }
+    const userIds = userRoles.map((ur) => ur.userId);
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { email: true, name: true },
+    });
+    const emailSubject = `[New Vision Inventory] Your business "${businessName}" has been suspended`;
+    const { html, text } = buildBrandedEmail({
+      subject: emailSubject,
+      title: 'Your Business Has Been Suspended',
+      preheader: `${businessName} has been suspended on New Vision Inventory.`,
+      body: [
+        'Hello,',
+        `We are writing to inform you that your business "${businessName}" has been suspended on New Vision Inventory.`,
+        `Reason: ${reason}`,
+        'Your staff will see a message that the account is suspended and will be directed to contact you for details.',
+        'If you believe this is an error or have questions, please contact our support team.',
+      ].join('\n'),
+    });
+    await Promise.allSettled(
+      users.map((user) =>
+        this.mailerService.sendEmail({
+          to: user.email,
+          subject: emailSubject,
+          html,
+          text,
+        }),
+      ),
+    );
   }
 
   async purgeBusiness(
@@ -1796,8 +1920,10 @@ export class PlatformService {
     businessId: string;
     platformAdminId: string;
     tier: SubscriptionTier;
-    durationDays: number;
+    months: number;
     startsAt?: Date | null;
+    isPaid?: boolean;
+    amountDue?: number;
     reason?: string;
     expectedUpdatedAt?: Date | null;
     idempotencyKey?: string;
@@ -1805,14 +1931,21 @@ export class PlatformService {
     if (!data.reason?.trim()) {
       throw new BadRequestException('Reason is required.');
     }
-    const durationDays = Number(data.durationDays);
-    if (!Number.isFinite(durationDays) || durationDays <= 0) {
-      throw new BadRequestException('Duration days must be greater than zero.');
+    const months = Number(data.months);
+    if (!Number.isFinite(months) || months <= 0) {
+      throw new BadRequestException('Months must be greater than zero.');
     }
     const baseStart = data.startsAt ?? new Date();
     if (Number.isNaN(baseStart.getTime())) {
       throw new BadRequestException('Invalid start date.');
     }
+
+    // Calendar-accurate month computation — e.g. Mar 15 + 3 months = Jun 15 (92 days, not 90)
+    const expiresAt = new Date(baseStart);
+    expiresAt.setMonth(expiresAt.getMonth() + months);
+    const durationDays = Math.round(
+      (expiresAt.getTime() - baseStart.getTime()) / (24 * 60 * 60 * 1000),
+    );
 
     const business = await this.prisma.business.findUnique({
       where: { id: data.businessId },
@@ -1838,13 +1971,13 @@ export class PlatformService {
       this.configService.get<string>('subscription.graceDays') ?? '7',
       10,
     );
-    const expiresAt = new Date(
-      baseStart.getTime() + durationDays * 24 * 60 * 60 * 1000,
-    );
     const graceEndsAt =
       graceDays > 0
         ? new Date(expiresAt.getTime() + graceDays * 24 * 60 * 60 * 1000)
         : null;
+
+    const isPaid = data.isPaid !== false; // default true
+    const amountDue = Math.max(0, Math.round(Number(data.amountDue ?? 0)));
 
     const subscription = await this.updateSubscription(data.businessId, {
       platformAdminId: data.platformAdminId,
@@ -1858,6 +1991,22 @@ export class PlatformService {
       idempotencyKey: data.idempotencyKey,
     });
 
+    await this.prisma.subscriptionPurchase.create({
+      data: {
+        businessId: data.businessId,
+        platformAdminId: data.platformAdminId,
+        tier: data.tier,
+        months,
+        durationDays,
+        startsAt: baseStart,
+        expiresAt,
+        isPaid,
+        amountDue,
+        reason: data.reason!,
+        idempotencyKey: data.idempotencyKey ?? null,
+      },
+    });
+
     return {
       subscription,
       lifecycle: {
@@ -1865,8 +2014,44 @@ export class PlatformService {
         expiresAt: expiresAt.toISOString(),
         graceEndsAt: graceEndsAt?.toISOString() ?? null,
         durationDays,
+        months,
         tier: data.tier,
+        isPaid,
+        amountDue,
       },
+    };
+  }
+
+  async getSubscriptionPurchases(
+    businessId: string,
+    options: { limit?: number; cursor?: string } = {},
+  ) {
+    const limit = Math.min(options.limit ?? 20, 100);
+    const purchases = await this.prisma.subscriptionPurchase.findMany({
+      where: { businessId },
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      ...(options.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
+      select: {
+        id: true,
+        tier: true,
+        months: true,
+        durationDays: true,
+        startsAt: true,
+        expiresAt: true,
+        isPaid: true,
+        amountDue: true,
+        reason: true,
+        createdAt: true,
+        platformAdmin: { select: { id: true, email: true } },
+      },
+    });
+
+    const hasNext = purchases.length > limit;
+    const items = hasNext ? purchases.slice(0, limit) : purchases;
+    return {
+      items,
+      nextCursor: hasNext ? items[items.length - 1]?.id ?? null : null,
     };
   }
 
@@ -2490,6 +2675,13 @@ export class PlatformService {
         status: incident.status,
       },
     });
+    this.platformEvents.emit('incident.created', {
+      incidentId: incident.id,
+      businessId: data.businessId,
+      severity: incident.severity,
+      title: incident.title ?? null,
+      reason: data.reason,
+    });
     return incident;
   }
 
@@ -2606,6 +2798,12 @@ export class PlatformService {
         fromStatus: incident.status,
         toStatus: data.toStatus,
       },
+    });
+    this.platformEvents.emit('incident.transitioned', {
+      incidentId: incident.id,
+      businessId: incident.businessId,
+      fromStatus: incident.status,
+      toStatus: data.toStatus,
     });
     return updated;
   }
@@ -2761,6 +2959,14 @@ export class PlatformService {
     }
 
     await this.syncBusinessReviewFromIncidents(data.businessId);
+
+    if (data.underReview) {
+      this.platformEvents.emit('business.review_flagged', {
+        businessId: data.businessId,
+        reason: data.reason,
+        severity: data.severity ?? null,
+      });
+    }
 
     if (idem) {
       await finalizeIdempotency(this.prisma, idem.record.id, {
@@ -3347,12 +3553,17 @@ export class PlatformService {
     if (!admin || !verifyPassword(params.currentPassword, admin.passwordHash)) {
       throw new UnauthorizedException('Current password is incorrect.');
     }
-    await this.prisma.platformAdmin.update({
-      where: { id: admin.id },
-      data: {
-        passwordHash: hashPassword(params.newPassword),
-      },
-    });
+    await this.prisma.$transaction([
+      this.prisma.platformAdmin.update({
+        where: { id: admin.id },
+        data: {
+          passwordHash: hashPassword(params.newPassword),
+        },
+      }),
+      this.prisma.platformAdminRefreshToken.deleteMany({
+        where: { platformAdminId: admin.id },
+      }),
+    ]);
     await this.logPlatformAction({
       platformAdminId: admin.id,
       action: 'PLATFORM_ADMIN_PASSWORD_CHANGE',
@@ -3628,5 +3839,622 @@ export class PlatformService {
       range: { start: start.toISOString(), end: now.toISOString() },
       timestamp: new Date().toISOString(),
     };
+  }
+
+  // ─── ANALYTICS ──────────────────────────────────────────────────────────────
+
+  private static readonly TIER_MONTHLY_PRICE: Record<string, number> = {
+    STARTER: 40000,
+    BUSINESS: 75000,
+    ENTERPRISE: 150000,
+  };
+
+  async getAnalyticsRevenue(range: string = '30d') {
+    const prices = PlatformService.TIER_MONTHLY_PRICE;
+
+    const activeSubscriptions = await this.prisma.subscription.findMany({
+      where: { status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.GRACE] } },
+      select: { tier: true, businessId: true },
+    });
+
+    const mrrByTier: Record<string, number> = {};
+    for (const sub of activeSubscriptions) {
+      const price = prices[sub.tier] ?? 0;
+      mrrByTier[sub.tier] = (mrrByTier[sub.tier] ?? 0) + price;
+    }
+    const mrr = Object.values(mrrByTier).reduce((sum, v) => sum + v, 0);
+
+    const now = new Date();
+    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+
+    // Paid vs complimentary breakdown from SubscriptionPurchase records
+    const activeBusinessIds = activeSubscriptions.map((s) => s.businessId);
+    const recentPurchases = await this.prisma.subscriptionPurchase.findMany({
+      where: {
+        businessId: { in: activeBusinessIds },
+        createdAt: { gte: twelveMonthsAgo },
+      },
+      select: {
+        businessId: true,
+        isPaid: true,
+        amountDue: true,
+        tier: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // For each active business, find its most recent purchase to determine paid/unpaid
+    const latestPurchaseByBusiness = new Map<string, { isPaid: boolean }>();
+    for (const p of recentPurchases) {
+      if (!latestPurchaseByBusiness.has(p.businessId)) {
+        latestPurchaseByBusiness.set(p.businessId, { isPaid: p.isPaid });
+      }
+    }
+
+    let paidCount = 0;
+    let complimentaryCount = 0;
+    for (const sub of activeSubscriptions) {
+      const latest = latestPurchaseByBusiness.get(sub.businessId);
+      if (!latest || latest.isPaid) {
+        paidCount++;
+      } else {
+        complimentaryCount++;
+      }
+    }
+
+    const totalCollected = recentPurchases
+      .filter((p) => p.isPaid)
+      .reduce((sum, p) => sum + p.amountDue, 0);
+
+    // Monthly actual collected (from purchase records)
+    const monthlyCollectedMap = new Map<string, number>();
+    for (const p of recentPurchases) {
+      if (!p.isPaid) continue;
+      const key = p.createdAt.toISOString().slice(0, 7);
+      monthlyCollectedMap.set(key, (monthlyCollectedMap.get(key) ?? 0) + p.amountDue);
+    }
+
+    // Monthly estimated (from subscription history transitions — legacy fallback)
+    const historyRows = await this.prisma.subscriptionHistory.findMany({
+      where: {
+        newStatus: SubscriptionStatus.ACTIVE,
+        createdAt: { gte: twelveMonthsAgo },
+      },
+      select: { newTier: true, createdAt: true },
+    });
+
+    const monthlyEstimatedMap = new Map<string, number>();
+    for (const row of historyRows) {
+      const key = row.createdAt.toISOString().slice(0, 7);
+      const price = prices[row.newTier ?? ''] ?? 0;
+      monthlyEstimatedMap.set(key, (monthlyEstimatedMap.get(key) ?? 0) + price);
+    }
+
+    const monthly: { month: string; collected: number; estimated: number }[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = d.toISOString().slice(0, 7);
+      monthly.push({
+        month: key,
+        collected: monthlyCollectedMap.get(key) ?? 0,
+        estimated: monthlyEstimatedMap.get(key) ?? 0,
+      });
+    }
+
+    return {
+      mrr,
+      arr: mrr * 12,
+      byTier: mrrByTier,
+      monthly,
+      totalSubscribers: activeSubscriptions.length,
+      paidCount,
+      complimentaryCount,
+      totalCollected,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async getAnalyticsCohorts() {
+    const businesses = await this.prisma.business.findMany({
+      where: { status: { not: BusinessStatus.DELETED } },
+      select: {
+        id: true,
+        createdAt: true,
+        subscription: { select: { tier: true, status: true } },
+      },
+    });
+
+    type CohortEntry = {
+      month: string;
+      count: number;
+      byTier: Record<string, number>;
+      active: number;
+    };
+    const cohortMap = new Map<string, CohortEntry>();
+
+    for (const biz of businesses) {
+      const month = biz.createdAt.toISOString().slice(0, 7);
+      if (!cohortMap.has(month)) {
+        cohortMap.set(month, { month, count: 0, byTier: {}, active: 0 });
+      }
+      const entry = cohortMap.get(month)!;
+      entry.count++;
+      const tier = biz.subscription?.tier ?? 'NONE';
+      entry.byTier[tier] = (entry.byTier[tier] ?? 0) + 1;
+      if (biz.subscription?.status === SubscriptionStatus.ACTIVE) entry.active++;
+    }
+
+    const cohorts = Array.from(cohortMap.values()).sort((a, b) =>
+      b.month.localeCompare(a.month),
+    );
+    return { cohorts, generatedAt: new Date().toISOString() };
+  }
+
+  async getAnalyticsChurn(range: string = '30d') {
+    const days = range === '7d' ? 7 : range === '90d' ? 90 : 30;
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+
+    const archivedOrDeleted = await this.prisma.business.findMany({
+      where: {
+        status: { in: [BusinessStatus.ARCHIVED, BusinessStatus.DELETED] },
+        updatedAt: { gte: since },
+      },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        updatedAt: true,
+        subscription: { select: { tier: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const totalActive = await this.prisma.subscription.count({
+      where: { status: SubscriptionStatus.ACTIVE },
+    });
+
+    const churnRate =
+      totalActive + archivedOrDeleted.length > 0
+        ? (archivedOrDeleted.length / (totalActive + archivedOrDeleted.length)) * 100
+        : 0;
+
+    return {
+      range: `${days}d`,
+      churnRate: Math.round(churnRate * 100) / 100,
+      churnedCount: archivedOrDeleted.length,
+      recentlyChurned: archivedOrDeleted.slice(0, 20).map((b) => ({
+        businessId: b.id,
+        name: b.name,
+        status: b.status,
+        tier: b.subscription?.tier ?? 'NONE',
+        churnedAt: b.updatedAt.toISOString(),
+      })),
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async getAnalyticsConversions() {
+    const conversions = await this.prisma.subscriptionHistory.findMany({
+      where: {
+        previousStatus: SubscriptionStatus.TRIAL,
+        newStatus: SubscriptionStatus.ACTIVE,
+      },
+      select: { businessId: true, newTier: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const trialBusinesses = await this.prisma.subscriptionHistory.findMany({
+      where: { newStatus: SubscriptionStatus.TRIAL },
+      select: { businessId: true },
+      distinct: ['businessId'],
+    });
+
+    const convertedIds = new Set(conversions.map((c) => c.businessId));
+    const conversionRate =
+      trialBusinesses.length > 0 ? (convertedIds.size / trialBusinesses.length) * 100 : 0;
+
+    const trialStartMap = new Map<string, Date>();
+    const trialStarts = await this.prisma.subscriptionHistory.findMany({
+      where: {
+        businessId: { in: Array.from(convertedIds) },
+        newStatus: SubscriptionStatus.TRIAL,
+      },
+      select: { businessId: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    for (const row of trialStarts) {
+      if (!trialStartMap.has(row.businessId)) {
+        trialStartMap.set(row.businessId, row.createdAt);
+      }
+    }
+
+    let totalTrialDays = 0;
+    let trialDaysCount = 0;
+    for (const conv of conversions) {
+      const start = trialStartMap.get(conv.businessId);
+      if (start) {
+        const days = (conv.createdAt.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
+        totalTrialDays += days;
+        trialDaysCount++;
+      }
+    }
+
+    const now = new Date();
+    const monthlyConversions: { month: string; conversions: number }[] = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = d.toISOString().slice(0, 7);
+      const count = conversions.filter((c) => c.createdAt.toISOString().startsWith(key)).length;
+      monthlyConversions.push({ month: key, conversions: count });
+    }
+
+    return {
+      conversionRate: Math.round(conversionRate * 100) / 100,
+      totalConversions: convertedIds.size,
+      totalTrialBusinesses: trialBusinesses.length,
+      avgTrialDays: trialDaysCount > 0 ? Math.round(totalTrialDays / trialDaysCount) : null,
+      monthlyConversions,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async getAnalyticsPurchases(options: {
+    isPaid?: boolean;
+    tier?: string;
+    from?: Date;
+    to?: Date;
+    limit?: number;
+    cursor?: string;
+  } = {}) {
+    const limit = Math.min(options.limit ?? 50, 200);
+    const where: Record<string, unknown> = {};
+    if (options.isPaid !== undefined) where.isPaid = options.isPaid;
+    if (options.tier) where.tier = options.tier;
+    if (options.from || options.to) {
+      where.createdAt = {
+        ...(options.from ? { gte: options.from } : {}),
+        ...(options.to ? { lte: options.to } : {}),
+      };
+    }
+
+    const purchases = await this.prisma.subscriptionPurchase.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      ...(options.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
+      select: {
+        id: true,
+        businessId: true,
+        tier: true,
+        months: true,
+        durationDays: true,
+        startsAt: true,
+        expiresAt: true,
+        isPaid: true,
+        amountDue: true,
+        reason: true,
+        createdAt: true,
+        business: { select: { name: true } },
+        platformAdmin: { select: { id: true, email: true } },
+      },
+    });
+
+    const hasNext = purchases.length > limit;
+    const items = hasNext ? purchases.slice(0, limit) : purchases;
+
+    // Aggregate totals from the full (unfiltered by cursor) result set
+    const totals = await this.prisma.subscriptionPurchase.aggregate({
+      where,
+      _sum: { amountDue: true },
+      _count: { id: true },
+    });
+    const paidTotals = await this.prisma.subscriptionPurchase.aggregate({
+      where: { ...where, isPaid: true },
+      _sum: { amountDue: true },
+      _count: { id: true },
+    });
+
+    return {
+      items,
+      nextCursor: hasNext ? items[items.length - 1]?.id ?? null : null,
+      summary: {
+        totalPurchases: totals._count.id,
+        totalCollected: paidTotals._sum.amountDue ?? 0,
+        paidCount: paidTotals._count.id,
+        complimentaryCount: totals._count.id - paidTotals._count.id,
+      },
+    };
+  }
+
+  // ─── GLOBAL SEARCH ──────────────────────────────────────────────────────────
+
+  async searchPlatform(q: string, types: string[] = ['businesses', 'incidents', 'announcements']) {
+    if (!q || q.trim().length < 2) {
+      return { businesses: [], incidents: [], announcements: [], query: q };
+    }
+    const term = q.trim();
+    const mode = Prisma.QueryMode.insensitive;
+
+    const [businesses, incidents, announcements] = await Promise.all([
+      types.includes('businesses')
+        ? this.prisma.business.findMany({
+            where: {
+              name: { contains: term, mode },
+              status: { not: BusinessStatus.DELETED },
+            },
+            select: { id: true, name: true, status: true },
+            take: 10,
+          })
+        : Promise.resolve([] as { id: string; name: string; status: string }[]),
+
+      types.includes('incidents')
+        ? this.prisma.platformIncident.findMany({
+            where: {
+              OR: [
+                { reason: { contains: term, mode } },
+                { title: { contains: term, mode } },
+              ],
+              status: {
+                notIn: [PlatformIncidentStatus.CLOSED, PlatformIncidentStatus.RESOLVED],
+              },
+            },
+            select: {
+              id: true,
+              reason: true,
+              title: true,
+              severity: true,
+              status: true,
+              businessId: true,
+              business: { select: { name: true } },
+            },
+            take: 10,
+          })
+        : Promise.resolve(
+            [] as {
+              id: string;
+              reason: string;
+              title: string | null;
+              severity: string;
+              status: string;
+              businessId: string;
+              business: { name: string } | null;
+            }[],
+          ),
+
+      types.includes('announcements')
+        ? this.prisma.platformAnnouncement.findMany({
+            where: {
+              title: { contains: term, mode },
+              endsAt: null,
+            },
+            select: { id: true, title: true, severity: true, startsAt: true },
+            take: 5,
+          })
+        : Promise.resolve(
+            [] as { id: string; title: string; severity: string; startsAt: Date }[],
+          ),
+    ]);
+
+    return {
+      businesses: businesses.map((b) => ({
+        type: 'business' as const,
+        id: b.id,
+        label: b.name,
+        meta: b.status,
+      })),
+      incidents: incidents.map((i) => ({
+        type: 'incident' as const,
+        id: i.id,
+        label: i.title ?? i.reason,
+        meta: `${i.severity} • ${i.status}`,
+        businessId: i.businessId,
+        businessName: i.business?.name ?? '',
+      })),
+      announcements: announcements.map((a) => ({
+        type: 'announcement' as const,
+        id: a.id,
+        label: a.title,
+        meta: a.severity,
+      })),
+      query: term,
+    };
+  }
+
+  // ─── ONBOARDING ─────────────────────────────────────────────────────────────
+
+  async getBusinessOnboarding(businessId: string) {
+    const [branchCount, productCount, saleCount, userCount, settings] = await Promise.all([
+      this.prisma.branch.count({ where: { businessId } }),
+      this.prisma.product.count({ where: { businessId } }),
+      this.prisma.sale.count({ where: { businessId, status: 'COMPLETED' } }),
+      this.prisma.businessUser.count({ where: { businessId } }),
+      this.prisma.businessSettings.findUnique({
+        where: { businessId },
+        select: { localeSettings: true },
+      }),
+    ]);
+
+    const hasSettings = Boolean(
+      settings?.localeSettings &&
+        typeof settings.localeSettings === 'object' &&
+        Object.keys(settings.localeSettings as object).length > 0,
+    );
+
+    const milestones = {
+      branches: branchCount > 0,
+      products: productCount > 0,
+      sales: saleCount > 0,
+      users: userCount > 1,
+      settings: hasSettings,
+    };
+
+    const completedCount = Object.values(milestones).filter(Boolean).length;
+    const totalCount = Object.keys(milestones).length;
+
+    return {
+      businessId,
+      milestones,
+      completedCount,
+      totalCount,
+      percentComplete: Math.round((completedCount / totalCount) * 100),
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  // ─── BUSINESS NOTES ─────────────────────────────────────────────────────────
+
+  async createBusinessNote({
+    businessId,
+    platformAdminId,
+    body,
+  }: {
+    businessId: string;
+    platformAdminId: string;
+    body: string;
+  }) {
+    if (!body?.trim()) {
+      throw new BadRequestException('Note body is required');
+    }
+    const business = await this.prisma.business.findUnique({ where: { id: businessId }, select: { id: true } });
+    if (!business) throw new NotFoundException('Business not found');
+    return this.prisma.platformBusinessNote.create({
+      data: { businessId, platformAdminId, body: body.trim() },
+      include: { platformAdmin: { select: { id: true, email: true } } },
+    });
+  }
+
+  async listBusinessNotes(businessId: string, pagination: PaginationQuery) {
+    const { take, skip, cursor } = parsePagination(pagination);
+    const where = { businessId };
+    const [items, total] = await Promise.all([
+      this.prisma.platformBusinessNote.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: take + 1,
+        ...(cursor ? { cursor, skip } : {}),
+        include: { platformAdmin: { select: { id: true, email: true } } },
+      }),
+      this.prisma.platformBusinessNote.count({ where }),
+    ]);
+    return buildPaginatedResponse(items, take, total);
+  }
+
+  async deleteBusinessNote({
+    noteId,
+    platformAdminId,
+  }: {
+    noteId: string;
+    platformAdminId: string;
+  }) {
+    const note = await this.prisma.platformBusinessNote.findUnique({ where: { id: noteId } });
+    if (!note) throw new NotFoundException('Note not found');
+    if (note.platformAdminId !== platformAdminId) {
+      throw new BadRequestException('You can only delete your own notes');
+    }
+    await this.prisma.platformBusinessNote.delete({ where: { id: noteId } });
+    return { deleted: true };
+  }
+
+  // ─── SCHEDULED ACTIONS ──────────────────────────────────────────────────────
+
+  async createScheduledAction({
+    businessId,
+    platformAdminId,
+    actionType,
+    payload,
+    scheduledFor,
+  }: {
+    businessId: string;
+    platformAdminId: string;
+    actionType: string;
+    payload: Record<string, unknown>;
+    scheduledFor: string;
+  }) {
+    const ALLOWED_TYPES = ['STATUS_CHANGE', 'SUBSCRIPTION_CHANGE'];
+    if (!ALLOWED_TYPES.includes(actionType)) {
+      throw new BadRequestException(`actionType must be one of: ${ALLOWED_TYPES.join(', ')}`);
+    }
+    const scheduledDate = new Date(scheduledFor);
+    if (isNaN(scheduledDate.getTime()) || scheduledDate <= new Date()) {
+      throw new BadRequestException('scheduledFor must be a valid future date');
+    }
+    const business = await this.prisma.business.findUnique({ where: { id: businessId }, select: { id: true } });
+    if (!business) throw new NotFoundException('Business not found');
+    return this.prisma.platformScheduledAction.create({
+      data: { businessId, platformAdminId, actionType, payload: payload as Prisma.InputJsonValue, scheduledFor: scheduledDate },
+    });
+  }
+
+  async listScheduledActions(businessId: string) {
+    return this.prisma.platformScheduledAction.findMany({
+      where: { businessId, executedAt: null, cancelledAt: null },
+      orderBy: { scheduledFor: 'asc' },
+      include: { platformAdmin: { select: { id: true, email: true } } },
+    });
+  }
+
+  async cancelScheduledAction({
+    actionId,
+    platformAdminId,
+  }: {
+    actionId: string;
+    platformAdminId: string;
+  }) {
+    const action = await this.prisma.platformScheduledAction.findUnique({ where: { id: actionId } });
+    if (!action) throw new NotFoundException('Scheduled action not found');
+    if (action.executedAt) throw new BadRequestException('Action has already been executed');
+    if (action.cancelledAt) throw new BadRequestException('Action is already cancelled');
+    return this.prisma.platformScheduledAction.update({
+      where: { id: actionId },
+      data: { cancelledAt: new Date() },
+    });
+  }
+
+  async runDueScheduledActions() {
+    const due = await this.prisma.platformScheduledAction.findMany({
+      where: { scheduledFor: { lte: new Date() }, executedAt: null, cancelledAt: null },
+      include: { business: { select: { id: true, status: true } } },
+    });
+
+    for (const action of due) {
+      try {
+        if (action.actionType === 'STATUS_CHANGE') {
+          const p = action.payload as { status?: string; reason?: string };
+          if (p.status) {
+            await this.prisma.$transaction([
+              this.prisma.business.update({
+                where: { id: action.businessId },
+                data: { status: p.status as any },
+              }),
+              this.prisma.platformScheduledAction.update({
+                where: { id: action.id },
+                data: { executedAt: new Date() },
+              }),
+            ]);
+          }
+        } else if (action.actionType === 'SUBSCRIPTION_CHANGE') {
+          const p = action.payload as { tier?: string; status?: string; reason?: string };
+          if (p.tier || p.status) {
+            await this.prisma.$transaction([
+              this.prisma.subscription.updateMany({
+                where: { businessId: action.businessId },
+                data: {
+                  ...(p.tier ? { tier: p.tier as any } : {}),
+                  ...(p.status ? { status: p.status as any } : {}),
+                },
+              }),
+              this.prisma.platformScheduledAction.update({
+                where: { id: action.id },
+                data: { executedAt: new Date() },
+              }),
+            ]);
+          }
+        }
+      } catch {
+        // Log and continue — one failure shouldn't block others
+      }
+    }
   }
 }

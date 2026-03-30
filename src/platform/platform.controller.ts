@@ -1,12 +1,14 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
   Post,
   Query,
   Req,
+  Sse,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
@@ -14,6 +16,7 @@ import { AuthService } from '../auth/auth.service';
 import { Public } from '../auth/public.decorator';
 import { PlatformService } from './platform.service';
 import { PlatformGuard } from './platform.guard';
+import { PlatformEventService } from './platform-event.service';
 import {
   BusinessStatus,
   PlatformIncidentSeverity,
@@ -32,6 +35,7 @@ export class PlatformController {
     private readonly authService: AuthService,
     private readonly platformService: PlatformService,
     private readonly supportAccessService: SupportAccessService,
+    private readonly platformEventService: PlatformEventService,
   ) {}
 
   @Post('auth/login')
@@ -43,12 +47,14 @@ export class PlatformController {
 
   @Post('auth/refresh')
   @Public()
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
   async refresh(@Body() body: { refreshToken: string }) {
     return this.authService.refreshPlatformAdminToken(body.refreshToken);
   }
 
   @Post('auth/logout')
   @Public()
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
   async logout(@Body() body: { refreshToken?: string }) {
     if (body.refreshToken) {
       await this.authService.logoutPlatformAdmin(body.refreshToken);
@@ -305,8 +311,10 @@ export class PlatformController {
     @Body()
     body: {
       tier: SubscriptionTier;
-      durationDays: number;
+      months: number;
       startsAt?: string | null;
+      isPaid?: boolean;
+      amountDue?: number;
       reason?: string;
       expectedUpdatedAt?: string;
       idempotencyKey?: string;
@@ -316,13 +324,28 @@ export class PlatformController {
       businessId,
       platformAdminId: requireUserId(req),
       tier: body.tier,
-      durationDays: body.durationDays,
+      months: body.months,
       startsAt: body.startsAt ? new Date(body.startsAt) : null,
+      isPaid: body.isPaid,
+      amountDue: body.amountDue,
       reason: body.reason,
       expectedUpdatedAt: body.expectedUpdatedAt
         ? new Date(body.expectedUpdatedAt)
         : null,
       idempotencyKey: body.idempotencyKey,
+    });
+  }
+
+  @Get('subscriptions/:businessId/purchases')
+  @UseGuards(PlatformGuard)
+  getSubscriptionPurchases(
+    @Param('businessId') businessId: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    return this.platformService.getSubscriptionPurchases(businessId, {
+      limit: limit ? parseInt(limit, 10) : undefined,
+      cursor,
     });
   }
 
@@ -864,5 +887,154 @@ export class PlatformController {
       announcementId,
       platformAdminId: requireUserId(req),
     });
+  }
+
+  // ─── BUSINESS NOTES ────────────────────────────────────────────────────────
+
+  @Post('businesses/:id/notes')
+  @UseGuards(PlatformGuard)
+  createBusinessNote(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') businessId: string,
+    @Body() body: { body: string },
+  ) {
+    return this.platformService.createBusinessNote({
+      businessId,
+      platformAdminId: requireUserId(req),
+      body: body.body,
+    });
+  }
+
+  @Get('businesses/:id/notes')
+  @UseGuards(PlatformGuard)
+  listBusinessNotes(
+    @Param('id') businessId: string,
+    @Query() query: { limit?: string; cursor?: string },
+  ) {
+    return this.platformService.listBusinessNotes(businessId, {
+      limit: query.limit ?? '20',
+      cursor: query.cursor,
+    });
+  }
+
+  @Delete('businesses/:id/notes/:noteId')
+  @UseGuards(PlatformGuard)
+  deleteBusinessNote(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') _businessId: string,
+    @Param('noteId') noteId: string,
+  ) {
+    return this.platformService.deleteBusinessNote({
+      noteId,
+      platformAdminId: requireUserId(req),
+    });
+  }
+
+  // ─── SCHEDULED ACTIONS ─────────────────────────────────────────────────────
+
+  @Post('businesses/:id/scheduled-actions')
+  @UseGuards(PlatformGuard)
+  createScheduledAction(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') businessId: string,
+    @Body() body: { actionType: string; payload: Record<string, unknown>; scheduledFor: string },
+  ) {
+    return this.platformService.createScheduledAction({
+      businessId,
+      platformAdminId: requireUserId(req),
+      actionType: body.actionType,
+      payload: body.payload,
+      scheduledFor: body.scheduledFor,
+    });
+  }
+
+  @Get('businesses/:id/scheduled-actions')
+  @UseGuards(PlatformGuard)
+  listScheduledActions(@Param('id') businessId: string) {
+    return this.platformService.listScheduledActions(businessId);
+  }
+
+  @Delete('businesses/:id/scheduled-actions/:actionId')
+  @UseGuards(PlatformGuard)
+  cancelScheduledAction(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') _businessId: string,
+    @Param('actionId') actionId: string,
+  ) {
+    return this.platformService.cancelScheduledAction({
+      actionId,
+      platformAdminId: requireUserId(req),
+    });
+  }
+
+  // ─── ANALYTICS ──────────────────────────────────────────────────────────────
+
+  @Get('analytics/revenue')
+  @UseGuards(PlatformGuard)
+  getAnalyticsRevenue(@Query('range') range?: string) {
+    return this.platformService.getAnalyticsRevenue(range ?? '30d');
+  }
+
+  @Get('analytics/cohorts')
+  @UseGuards(PlatformGuard)
+  getAnalyticsCohorts() {
+    return this.platformService.getAnalyticsCohorts();
+  }
+
+  @Get('analytics/churn')
+  @UseGuards(PlatformGuard)
+  getAnalyticsChurn(@Query('range') range?: string) {
+    return this.platformService.getAnalyticsChurn(range ?? '30d');
+  }
+
+  @Get('analytics/conversions')
+  @UseGuards(PlatformGuard)
+  getAnalyticsConversions() {
+    return this.platformService.getAnalyticsConversions();
+  }
+
+  @Get('analytics/purchases')
+  @UseGuards(PlatformGuard)
+  getAnalyticsPurchases(
+    @Query('isPaid') isPaid?: string,
+    @Query('tier') tier?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    return this.platformService.getAnalyticsPurchases({
+      isPaid: isPaid !== undefined ? isPaid === 'true' : undefined,
+      tier: tier || undefined,
+      from: from ? new Date(from) : undefined,
+      to: to ? new Date(to) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      cursor,
+    });
+  }
+
+  // ─── GLOBAL SEARCH ──────────────────────────────────────────────────────────
+
+  @Get('search')
+  @UseGuards(PlatformGuard)
+  searchPlatform(@Query('q') q: string, @Query('types') types?: string) {
+    const typeList = types ? types.split(',') : ['businesses', 'incidents', 'announcements'];
+    return this.platformService.searchPlatform(q ?? '', typeList);
+  }
+
+  // ─── ONBOARDING ─────────────────────────────────────────────────────────────
+
+  @Get('businesses/:businessId/onboarding')
+  @UseGuards(PlatformGuard)
+  getBusinessOnboarding(@Param('businessId') businessId: string) {
+    return this.platformService.getBusinessOnboarding(businessId);
+  }
+
+  // ─── REAL-TIME EVENT STREAM ─────────────────────────────────────────────────
+
+  @Sse('events')
+  @Public()
+  streamPlatformEvents(@Query('token') token: string) {
+    return this.platformEventService.createStream(token ?? '');
   }
 }

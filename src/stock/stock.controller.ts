@@ -11,7 +11,7 @@ import {
 import { StockService } from './stock.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
-import { LossReason, StockMovementType } from '@prisma/client';
+import { GainReason, LossReason, StockMovementType } from '@prisma/client';
 import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller('stock')
@@ -108,6 +108,7 @@ export class StockController {
       type: 'POSITIVE' | 'NEGATIVE';
       batchId?: string;
       lossReason?: LossReason;
+      gainReason?: GainReason;
       idempotencyKey?: string;
     },
   ) {

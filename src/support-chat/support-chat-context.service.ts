@@ -171,6 +171,8 @@ export class SupportChatContextService {
       input.route.includes('/receiving');
     const shouldIncludeShiftSignals =
       input.route.includes('/pos') || input.route.includes('/shifts');
+    const shouldIncludePriceListSignals =
+      input.route.includes('/price-lists') || input.route.includes('/pos');
 
     const [
       categoriesCount,
@@ -178,6 +180,7 @@ export class SupportChatContextService {
       variantsCount,
       suppliersCount,
       openShiftCount,
+      priceListsCount,
     ] = await Promise.all([
       shouldIncludeCatalogSignals
         ? this.prisma.category.count({ where: { businessId: input.businessId } })
@@ -200,6 +203,9 @@ export class SupportChatContextService {
             },
           })
         : Promise.resolve(0),
+      shouldIncludePriceListSignals
+        ? this.prisma.priceList.count({ where: { businessId: input.businessId } })
+        : Promise.resolve(0),
     ]);
 
     return {
@@ -213,6 +219,8 @@ export class SupportChatContextService {
       has_suppliers: suppliersCount > 0,
       has_open_shift_in_active_branch:
         input.activeBranchId !== null ? openShiftCount > 0 : null,
+      has_active_branch: input.activeBranchId !== null,
+      has_price_lists: priceListsCount > 0,
       branch_scope_size: input.branchScope.length,
     };
   }

@@ -2,6 +2,8 @@ import {
   CanActivate,
   ExecutionContext,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -57,6 +59,16 @@ export class BusinessStatusGuard implements CanActivate {
         reason: business.status,
         metadata: buildRequestMetadata(request),
       });
+      if (business.status === 'SUSPENDED') {
+        throw new HttpException(
+          {
+            message: 'Business is not active.',
+            errorCode: 'BUSINESS_SUSPENDED',
+            statusCode: 403,
+          },
+          HttpStatus.FORBIDDEN,
+        );
+      }
       throw new ForbiddenException('Business is not active.');
     }
 

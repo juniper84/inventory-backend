@@ -21,6 +21,7 @@ model Business {
   reviewedAt                  DateTime?
   underReview                 Boolean                              @default(false)
   reviewSeverity              String?
+  suspensionReason            String?
   approvals                   Approval[]
   approvalPolicies            ApprovalPolicy[]
   attachments                 Attachment[]
@@ -38,6 +39,8 @@ model Business {
   idempotencyKeys             IdempotencyKey[]
   invitations                 Invitation[]
   lossEntries                 LossEntry[]
+  gainEntries                 GainEntry[]
+  stockCountVarianceCosts     StockCountVarianceCost[]
   notes                       Note[]
   noteLinks                   NoteLink[]
   noteReminders               NoteReminder[]
@@ -46,6 +49,9 @@ model Business {
   offlineDevices              OfflineDevice[]
   platformAnnouncementTargets PlatformAnnouncementBusinessTarget[]
   platformIncidents           PlatformIncident[]
+  platformBusinessNotes       PlatformBusinessNote[]
+  platformScheduledActions    PlatformScheduledAction[]
+  subscriptionPurchases       SubscriptionPurchase[]
   priceLists                  PriceList[]
   products                    Product[]
   productImages               ProductImage[]
@@ -88,22 +94,24 @@ model Branch {
   priceList            PriceList?                  @relation(fields: [priceListId], references: [id])
   variantAvailability  BranchVariantAvailability[]
   expenses             Expense[]
-  lossEntries          LossEntry[]
-  notes                Note[]
-  noteReminders        NoteReminder[]
-  notifications        Notification[]
-  purchases            Purchase[]
-  purchaseOrders       PurchaseOrder[]
-  reorderPoints        ReorderPoint[]
-  sales                Sale[]
-  saleRefunds          SaleRefund[]
-  shifts               Shift[]
-  stockMovements       StockMovement[]
-  stockSnapshots       StockSnapshot[]
-  supplierReturns      SupplierReturn[]
-  transferDestinations Transfer[]                  @relation("TransferDestinationBranch")
-  transferSources      Transfer[]                  @relation("TransferSourceBranch")
-  userRoles            UserRole[]
+  lossEntries              LossEntry[]
+  gainEntries              GainEntry[]
+  stockCountVarianceCosts  StockCountVarianceCost[]
+  notes                    Note[]
+  noteReminders            NoteReminder[]
+  notifications            Notification[]
+  purchases                Purchase[]
+  purchaseOrders           PurchaseOrder[]
+  reorderPoints            ReorderPoint[]
+  sales                    Sale[]
+  saleRefunds              SaleRefund[]
+  shifts                   Shift[]
+  stockMovements           StockMovement[]
+  stockSnapshots           StockSnapshot[]
+  supplierReturns          SupplierReturn[]
+  transferDestinations     Transfer[]                  @relation("TransferDestinationBranch")
+  transferSources          Transfer[]                  @relation("TransferSourceBranch")
+  userRoles                UserRole[]
 }
 
 model User {
@@ -179,6 +187,62 @@ model PlatformAdmin {
   ownedIncidents        PlatformIncident[]           @relation("PlatformIncidentOwner")
   incidentEvents        PlatformIncidentEvent[]
   refreshTokens         PlatformAdminRefreshToken[]
+  businessNotes         PlatformBusinessNote[]
+  scheduledActions      PlatformScheduledAction[]
+  subscriptionPurchases SubscriptionPurchase[]
+}
+
+model PlatformBusinessNote {
+  id                String        @id @default(uuid())
+  businessId        String
+  platformAdminId   String
+  body              String
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  business          Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  platformAdmin     PlatformAdmin @relation(fields: [platformAdminId], references: [id])
+
+  @@index([businessId, createdAt])
+  @@index([platformAdminId])
+}
+
+model PlatformScheduledAction {
+  id                String        @id @default(uuid())
+  businessId        String
+  platformAdminId   String
+  actionType        String
+  payload           Json
+  scheduledFor      DateTime
+  executedAt        DateTime?
+  cancelledAt       DateTime?
+  createdAt         DateTime      @default(now())
+  business          Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  platformAdmin     PlatformAdmin @relation(fields: [platformAdminId], references: [id])
+
+  @@index([businessId, cancelledAt, executedAt])
+  @@index([scheduledFor, executedAt, cancelledAt])
+}
+
+model SubscriptionPurchase {
+  id              String        @id @default(uuid())
+  businessId      String
+  platformAdminId String
+  tier            String
+  months          Int
+  durationDays    Int
+  startsAt        DateTime
+  expiresAt       DateTime
+  isPaid          Boolean       @default(true)
+  amountDue       Int
+  reason          String
+  idempotencyKey  String?       @unique
+  createdAt       DateTime      @default(now())
+  business        Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  platformAdmin   PlatformAdmin @relation(fields: [platformAdminId], references: [id])
+
+  @@index([businessId, createdAt])
+  @@index([platformAdminId, createdAt])
+  @@index([isPaid, createdAt])
 }
 
 model PlatformAdminRefreshToken {
@@ -877,8 +941,10 @@ model Variant {
   barcodes            Barcode[]
   batches             Batch[]
   availability        BranchVariantAvailability[]
-  lossEntries         LossEntry[]
-  priceListItems      PriceListItem[]
+  lossEntries                LossEntry[]
+  gainEntries                GainEntry[]
+  stockCountVarianceCosts    StockCountVarianceCost[]
+  priceListItems             PriceListItem[]
   purchaseLines       PurchaseLine[]
   purchaseOrderLines  PurchaseOrderLine[]
   receivingLines      ReceivingLine[]
@@ -970,25 +1036,27 @@ model Batch {
 }
 
 model StockMovement {
-  id           String            @id @default(uuid())
-  businessId   String
-  branchId     String
-  variantId    String
-  batchId      String?
-  quantity     Decimal           @db.Decimal(12, 2)
-  movementType StockMovementType
-  reason       String?
-  createdAt    DateTime          @default(now())
-  unitId       String?
-  unitQuantity Decimal?          @db.Decimal(12, 2)
-  createdById  String?
-  lossEntries  LossEntry[]
-  batch        Batch?            @relation(fields: [batchId], references: [id])
-  branch       Branch            @relation(fields: [branchId], references: [id])
-  business     Business          @relation(fields: [businessId], references: [id])
-  createdBy    User?             @relation(fields: [createdById], references: [id])
-  unit         Unit?             @relation(fields: [unitId], references: [id])
-  variant      Variant           @relation(fields: [variantId], references: [id])
+  id                     String                  @id @default(uuid())
+  businessId             String
+  branchId               String
+  variantId              String
+  batchId                String?
+  quantity               Decimal                 @db.Decimal(12, 2)
+  movementType           StockMovementType
+  reason                 String?
+  createdAt              DateTime                @default(now())
+  unitId                 String?
+  unitQuantity           Decimal?                @db.Decimal(12, 2)
+  createdById            String?
+  lossEntries            LossEntry[]
+  gainEntries            GainEntry[]
+  stockCountVarianceCost StockCountVarianceCost?
+  batch                  Batch?                  @relation(fields: [batchId], references: [id])
+  branch                 Branch                  @relation(fields: [branchId], references: [id])
+  business               Business                @relation(fields: [businessId], references: [id])
+  createdBy              User?                   @relation(fields: [createdById], references: [id])
+  unit                   Unit?                   @relation(fields: [unitId], references: [id])
+  variant                Variant                 @relation(fields: [variantId], references: [id])
 
   @@index([businessId, branchId, variantId])
 }
@@ -1052,6 +1120,48 @@ model LossEntry {
   totalCost       Decimal       @db.Decimal(12, 2)
   reason          LossReason
   note            String?
+  createdAt       DateTime      @default(now())
+  branch          Branch        @relation(fields: [branchId], references: [id])
+  business        Business      @relation(fields: [businessId], references: [id])
+  stockMovement   StockMovement @relation(fields: [stockMovementId], references: [id])
+  variant         Variant       @relation(fields: [variantId], references: [id])
+
+  @@index([businessId, branchId, createdAt])
+  @@index([businessId, variantId, createdAt])
+}
+
+model GainEntry {
+  id              String        @id @default(uuid())
+  businessId      String
+  branchId        String
+  variantId       String
+  stockMovementId String
+  quantity        Decimal       @db.Decimal(12, 2)
+  unitCost        Decimal       @db.Decimal(12, 2)
+  totalCost       Decimal       @db.Decimal(12, 2)
+  reason          GainReason
+  note            String?
+  createdAt       DateTime      @default(now())
+  branch          Branch        @relation(fields: [branchId], references: [id])
+  business        Business      @relation(fields: [businessId], references: [id])
+  stockMovement   StockMovement @relation(fields: [stockMovementId], references: [id])
+  variant         Variant       @relation(fields: [variantId], references: [id])
+
+  @@index([businessId, branchId, createdAt])
+  @@index([businessId, variantId, createdAt])
+}
+
+model StockCountVarianceCost {
+  id              String        @id @default(uuid())
+  businessId      String
+  branchId        String
+  variantId       String
+  stockMovementId String        @unique
+  quantity        Decimal       @db.Decimal(12, 2)
+  unitCost        Decimal       @db.Decimal(12, 2)
+  totalCost       Decimal       @db.Decimal(12, 2)
+  varianceType    VarianceType
+  reason          String?
   createdAt       DateTime      @default(now())
   branch          Branch        @relation(fields: [branchId], references: [id])
   business        Business      @relation(fields: [businessId], references: [id])
@@ -1752,6 +1862,19 @@ enum LossReason {
   EXPIRED
   SHRINKAGE
   OTHER
+}
+
+enum GainReason {
+  UNRECORDED_PURCHASE
+  FOUND_STOCK
+  RETURN_NOT_LOGGED
+  CORRECTION
+  OTHER
+}
+
+enum VarianceType {
+  SHORTAGE
+  SURPLUS
 }
 
 enum ExpenseCategory {

@@ -108,6 +108,7 @@ export class SupportAccessService {
             : {}),
         },
         include: {
+          business: { select: { name: true } },
           sessions: {
             where: { revokedAt: null },
             orderBy: { createdAt: 'desc' },
@@ -147,6 +148,7 @@ export class SupportAccessService {
             : {}),
         },
         include: {
+          business: { select: { name: true } },
           request: {
             select: {
               id: true,

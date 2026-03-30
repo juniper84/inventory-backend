@@ -124,7 +124,12 @@ export class ExpensesService {
         where,
         include: {
           branch: true,
-          transfer: true,
+          transfer: {
+            include: {
+              sourceBranch: { select: { id: true, name: true } },
+              destinationBranch: { select: { id: true, name: true } },
+            },
+          },
         },
         orderBy: { createdAt: 'desc' },
         ...pagination,

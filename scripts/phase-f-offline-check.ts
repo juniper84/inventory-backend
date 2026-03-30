@@ -86,6 +86,7 @@ async function main() {
     prisma,
     configService,
     auditService,
+    { emit: () => {} } as any,
   );
   const salesService = new SalesService(
     prisma,

@@ -5,7 +5,7 @@ import {
   Inject,
   forwardRef,
 } from '@nestjs/common';
-import { LossReason, Prisma, StockMovementType } from '@prisma/client';
+import { GainReason, LossReason, Prisma, StockMovementType, VarianceType } from '@prisma/client';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
 import {
@@ -73,7 +73,7 @@ export class StockService {
         where,
         include: {
           branch: true,
-          variant: { include: { baseUnit: true, sellUnit: true } },
+          variant: { include: { baseUnit: true, sellUnit: true, product: { select: { name: true } } } },
         },
         orderBy: { updatedAt: 'desc' },
         ...pagination,
@@ -374,6 +374,7 @@ export class StockService {
       type: 'POSITIVE' | 'NEGATIVE';
       batchId?: string;
       lossReason?: LossReason;
+      gainReason?: GainReason;
       idempotencyKey?: string;
     },
     options?: { skipApproval?: boolean; approvalId?: string },
@@ -455,6 +456,7 @@ export class StockService {
       type: data.type,
       batchId: data.batchId,
       lossReason: data.lossReason,
+      gainReason: data.gainReason,
       idempotencyKey: data.idempotencyKey,
     };
     if (!options?.skipApproval) {
@@ -514,11 +516,15 @@ export class StockService {
 
     let movement;
     let lossEntryId: string | null = null;
+    let gainEntryId: string | null = null;
     let beforeSnapshot: { id: string; quantity: Prisma.Decimal } | null = null;
 
-    // Pre-compute loss cost before opening the transaction (read-only operation)
+    // Pre-compute unit cost before opening the transaction (read-only operation)
     let resolvedUnitCost: Prisma.Decimal | null = null;
-    if (data.type === 'NEGATIVE' && data.lossReason) {
+    if (
+      (data.type === 'NEGATIVE' && data.lossReason) ||
+      (data.type === 'POSITIVE' && data.gainReason)
+    ) {
       resolvedUnitCost =
         (await this.resolveUnitCost(
           businessId,
@@ -577,6 +583,25 @@ export class StockService {
           txLossEntryId = lossEntry.id;
         }
 
+        let txGainEntryId: string | null = null;
+        if (data.type === 'POSITIVE' && data.gainReason && resolvedUnitCost) {
+          const totalCost = resolvedUnitCost.mul(quantity);
+          const gainEntry = await tx.gainEntry.create({
+            data: {
+              businessId,
+              branchId: data.branchId,
+              variantId: data.variantId,
+              stockMovementId: txMovement.id,
+              quantity,
+              unitCost: resolvedUnitCost,
+              totalCost,
+              reason: data.gainReason,
+              note: data.reason ?? null,
+            },
+          });
+          txGainEntryId = gainEntry.id;
+        }
+
         const txSnapshot = await tx.stockSnapshot.upsert({
           where: {
             businessId_branchId_variantId: {
@@ -599,11 +624,12 @@ export class StockService {
           },
         });
 
-        return { txMovement, txLossEntryId, txSnapshot, txBeforeSnapshot };
+        return { txMovement, txLossEntryId, txGainEntryId, txSnapshot, txBeforeSnapshot };
       });
 
       movement = txResult.txMovement;
       lossEntryId = txResult.txLossEntryId;
+      gainEntryId = txResult.txGainEntryId;
       afterSnapshot = txResult.txSnapshot;
       beforeSnapshot = txResult.txBeforeSnapshot;
 
@@ -652,6 +678,7 @@ export class StockService {
       metadata: {
         ...data,
         lossEntryId,
+        gainEntryId,
         stockBefore,
         stockAfter,
         stockDelta,
@@ -860,7 +887,21 @@ export class StockService {
     const varianceQuantity = new Prisma.Decimal(variance);
     const movementType = StockMovementType.STOCK_COUNT_VARIANCE;
 
+    // Pre-compute unit cost for variance financial tracking
+    let varianceUnitCost: Prisma.Decimal | null = null;
+    if (variance !== 0) {
+      varianceUnitCost =
+        (await this.resolveUnitCost(
+          businessId,
+          data.branchId,
+          data.variantId,
+          data.batchId ?? null,
+          policies.valuationMethod,
+        )) ?? new Prisma.Decimal(variant.defaultCost ?? 0);
+    }
+
     let movement;
+    let varianceCostId: string | null = null;
     let afterSnapshot: { id: string; quantity: Prisma.Decimal } | null = null;
     try {
       const txResult = await this.prisma.$transaction(async (tx) => {
@@ -887,6 +928,26 @@ export class StockService {
           },
         });
 
+        let txVarianceCostId: string | null = null;
+        if (variance !== 0 && varianceUnitCost) {
+          const absQuantity = new Prisma.Decimal(Math.abs(variance));
+          const totalCost = varianceUnitCost.mul(absQuantity);
+          const varianceCost = await tx.stockCountVarianceCost.create({
+            data: {
+              businessId,
+              branchId: data.branchId,
+              variantId: data.variantId,
+              stockMovementId: txMovement.id,
+              quantity: absQuantity,
+              unitCost: varianceUnitCost,
+              totalCost,
+              varianceType: variance < 0 ? VarianceType.SHORTAGE : VarianceType.SURPLUS,
+              reason: data.reason ?? null,
+            },
+          });
+          txVarianceCostId = varianceCost.id;
+        }
+
         const txSnapshot = await tx.stockSnapshot.upsert({
           where: {
             businessId_branchId_variantId: {
@@ -906,10 +967,11 @@ export class StockService {
           },
         });
 
-        return { txMovement, txSnapshot, txBeforeSnapshot };
+        return { txMovement, txVarianceCostId, txSnapshot, txBeforeSnapshot };
       });
 
       movement = txResult.txMovement;
+      varianceCostId = txResult.txVarianceCostId;
       afterSnapshot = txResult.txSnapshot;
       beforeSnapshot = txResult.txBeforeSnapshot;
       await this.maybeNotifyLowStock(
@@ -945,6 +1007,7 @@ export class StockService {
         ...data,
         expectedQuantity,
         variance: Number(baseCountedQuantity) - expectedQuantity,
+        varianceCostId,
       },
     });
     if (afterSnapshot) {

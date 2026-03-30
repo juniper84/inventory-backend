@@ -27,6 +27,7 @@ describe('PlatformService', () => {
       {} as any,
       {} as any,
       { get: jest.fn().mockReturnValue('7') } as any,
+      { emit: jest.fn() } as any,
     );
 
     return { service, prisma };
