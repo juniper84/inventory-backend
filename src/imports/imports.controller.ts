@@ -2,7 +2,9 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   Post,
+  Query,
   Req,
 } from '@nestjs/common';
 import { ImportsService } from './imports.service';
@@ -17,8 +19,30 @@ export class ImportsController {
   // P2-G2-M3: Maximum allowed CSV size is 10 MB to prevent OOM during parsing.
   private static readonly MAX_CSV_BYTES = 10 * 1024 * 1024;
 
+  @Get('template')
+  @Permissions(PermissionsList.IMPORTS_WRITE)
+  getTemplate(
+    @Req() req: { user?: { businessId: string } },
+    @Query('type') type: string,
+  ) {
+    const validTypes = ['opening_stock', 'price_updates', 'status_updates', 'stock_counts'];
+    if (!validTypes.includes(type)) {
+      throw new BadRequestException(`Template type must be one of: ${validTypes.join(', ')}`);
+    }
+    return this.importsService.generatePrefilledTemplate(
+      requireBusinessId(req),
+      type as 'opening_stock' | 'price_updates' | 'status_updates' | 'stock_counts',
+    );
+  }
+
+  @Get('history')
+  @Permissions(PermissionsList.IMPORTS_WRITE)
+  listHistory(@Req() req: { user?: { businessId: string } }) {
+    return this.importsService.listHistory(requireBusinessId(req));
+  }
+
   @Post('preview')
-  @Permissions(PermissionsList.EXPORTS_WRITE)
+  @Permissions(PermissionsList.IMPORTS_WRITE)
   preview(
     @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
@@ -31,7 +55,10 @@ export class ImportsController {
         | 'status_updates'
         | 'suppliers'
         | 'branches'
-        | 'users';
+        | 'users'
+        | 'customers'
+        | 'units'
+        | 'stock_counts';
       csv: string;
       options?: { createMissingCategories?: boolean };
     },
@@ -46,7 +73,7 @@ export class ImportsController {
   }
 
   @Post('apply')
-  @Permissions(PermissionsList.EXPORTS_WRITE)
+  @Permissions(PermissionsList.IMPORTS_WRITE)
   apply(
     @Req() req: { user?: { businessId: string; sub?: string } },
     @Body()
@@ -59,7 +86,10 @@ export class ImportsController {
         | 'status_updates'
         | 'suppliers'
         | 'branches'
-        | 'users';
+        | 'users'
+        | 'customers'
+        | 'units'
+        | 'stock_counts';
       csv: string;
       options?: { createMissingCategories?: boolean };
     },

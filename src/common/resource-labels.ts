@@ -1451,6 +1451,7 @@ export async function resolveResourceNames(
       where: { id: { in: Array.from(transferIds) }, businessId },
       select: {
         id: true,
+        referenceNumber: true,
         sourceBranch: { select: { name: true } },
         destinationBranch: { select: { name: true } },
       },
@@ -1458,10 +1459,13 @@ export async function resolveResourceNames(
     transfers.forEach((transfer) => {
       const source = transfer.sourceBranch?.name?.trim();
       const destination = transfer.destinationBranch?.name?.trim();
-      const label =
+      const route =
         source && destination
           ? `${source} -> ${destination}`
           : (source ?? destination ?? null);
+      const label = transfer.referenceNumber
+        ? (route ? `${transfer.referenceNumber} (${route})` : transfer.referenceNumber)
+        : route;
       labels.set(
         toKey('Transfer', transfer.id),
         labelWithFallback({ name: label, id: transfer.id }),

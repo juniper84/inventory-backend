@@ -61,6 +61,18 @@ export class CustomersController {
     );
   }
 
+  @Get(':id/timeline')
+  @Permissions(PermissionsList.CUSTOMERS_VIEW)
+  getTimeline(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.customersService.getCustomerTimeline(
+      requireBusinessId(req),
+      id,
+    );
+  }
+
   @Post()
   @Permissions(PermissionsList.CUSTOMERS_CREATE)
   create(

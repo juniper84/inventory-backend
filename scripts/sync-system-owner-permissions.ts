@@ -23,7 +23,7 @@ const ALL_PERMISSION_CODES: string[] = [
   'purchases.read', 'purchases.write',
   'suppliers.read', 'suppliers.write',
   'expenses.read', 'expenses.write',
-  'reports.read', 'exports.write', 'audit.read',
+  'reports.read', 'exports.write', 'imports.write', 'audit.read',
   'offline.read', 'offline.write',
   'attachments.read', 'attachments.write',
   'customers.read', 'customers.create', 'customers.update',

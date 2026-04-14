@@ -82,8 +82,10 @@ export class SubscriptionService {
 
   async getSubscription(
     businessId: string,
+    tx?: Prisma.TransactionClient,
   ): Promise<SubscriptionSnapshot | null> {
-    const subscription = await this.prisma.subscription.findUnique({
+    const client = tx ?? this.prisma;
+    const subscription = await client.subscription.findUnique({
       where: { businessId },
     });
 
@@ -105,8 +107,9 @@ export class SubscriptionService {
     };
   }
 
-  async createTrialSubscription(businessId: string, tier: SubscriptionTier, actorId?: string) {
-    const existing = await this.prisma.subscription.findUnique({
+  async createTrialSubscription(businessId: string, tier: SubscriptionTier, actorId?: string, tx?: Prisma.TransactionClient) {
+    const client = tx ?? this.prisma;
+    const existing = await client.subscription.findUnique({
       where: { businessId },
     });
     if (existing) {
@@ -129,7 +132,7 @@ export class SubscriptionService {
     const trialEndsAt = new Date(now);
     trialEndsAt.setDate(trialEndsAt.getDate() + trialDays);
 
-    const created = await this.prisma.subscription.create({
+    const created = await client.subscription.create({
       data: {
         businessId,
         tier,
@@ -138,20 +141,25 @@ export class SubscriptionService {
         limits: DEFAULT_LIMITS[tier],
       },
     });
-    await this.auditService.logEvent({
-      businessId,
-      userId: actorId ?? 'background',
-      action: 'SUBSCRIPTION_CREATE',
-      resourceType: 'Subscription',
-      resourceId: created.id,
-      outcome: 'SUCCESS',
-      metadata: {
-        resourceName: `${tier} (${SubscriptionStatus.TRIAL})`,
-        tier,
-        status: SubscriptionStatus.TRIAL,
-      },
-      after: created as unknown as Record<string, unknown>,
-    });
+    // When running inside a transaction, skip audit logging here — the business
+    // record hasn't been committed yet so AuditLog's FK to Business would fail.
+    // The caller (afterBusinessCreated) logs SUBSCRIPTION_TRIAL_START post-transaction.
+    if (!tx) {
+      await this.auditService.logEvent({
+        businessId,
+        userId: actorId ?? 'background',
+        action: 'SUBSCRIPTION_CREATE',
+        resourceType: 'Subscription',
+        resourceId: created.id,
+        outcome: 'SUCCESS',
+        metadata: {
+          resourceName: `${tier} (${SubscriptionStatus.TRIAL})`,
+          tier,
+          status: SubscriptionStatus.TRIAL,
+        },
+        after: created as unknown as Record<string, unknown>,
+      });
+    }
     return created;
   }
 
@@ -206,7 +214,7 @@ export class SubscriptionService {
     amount: number = 1,
     tx?: Prisma.TransactionClient,
   ) {
-    const subscription = await this.getSubscription(businessId);
+    const subscription = await this.getSubscription(businessId, tx);
     if (!subscription) {
       throw new BadRequestException('Subscription not found.');
     }
@@ -302,22 +310,55 @@ export class SubscriptionService {
     businessId: string,
     userId: string,
     data: {
-      type: SubscriptionRequestType | 'UPGRADE' | 'DOWNGRADE' | 'CANCEL';
+      type: SubscriptionRequestType | 'UPGRADE' | 'DOWNGRADE' | 'CANCEL' | 'SUBSCRIBE';
       requestedTier?: SubscriptionTier | 'STARTER' | 'BUSINESS' | 'ENTERPRISE';
       reason?: string;
+      requestedDurationMonths?: number;
     },
   ) {
     if (!businessId) {
       throw new BadRequestException('Business context required.');
     }
-    const type = data.type;
+    const type = data.type as SubscriptionRequestType;
+
+    // Reject DOWNGRADE
+    if (type === SubscriptionRequestType.DOWNGRADE) {
+      throw new BadRequestException('Downgrade requests are not supported.');
+    }
+
     if (
       (type === SubscriptionRequestType.UPGRADE ||
-        type === SubscriptionRequestType.DOWNGRADE) &&
+        type === SubscriptionRequestType.SUBSCRIBE) &&
       !data.requestedTier
     ) {
       throw new BadRequestException('Requested tier is required.');
     }
+
+    // For UPGRADE/SUBSCRIBE: validate that requested tier is above current tier
+    if (
+      (type === SubscriptionRequestType.UPGRADE ||
+        type === SubscriptionRequestType.SUBSCRIBE) &&
+      data.requestedTier
+    ) {
+      const subscription = await this.prisma.subscription.findUnique({
+        where: { businessId },
+      });
+      if (subscription) {
+        const tierOrder: Record<string, number> = {
+          STARTER: 0,
+          BUSINESS: 1,
+          ENTERPRISE: 2,
+        };
+        const currentRank = tierOrder[subscription.tier] ?? 0;
+        const requestedRank = tierOrder[data.requestedTier] ?? 0;
+        if (requestedRank <= currentRank) {
+          throw new BadRequestException(
+            'Requested tier must be above your current tier.',
+          );
+        }
+      }
+    }
+
     const existing = await this.prisma.subscriptionRequest.findFirst({
       where: { businessId, status: SubscriptionRequestStatus.PENDING },
     });
@@ -333,6 +374,7 @@ export class SubscriptionService {
         type,
         requestedTier: data.requestedTier ? data.requestedTier : null,
         reason: data.reason ?? null,
+        requestedDurationMonths: data.requestedDurationMonths ?? null,
       },
     });
     await this.auditService.logEvent({
@@ -346,6 +388,7 @@ export class SubscriptionService {
       metadata: {
         type,
         requestedTier: data.requestedTier ?? null,
+        requestedDurationMonths: data.requestedDurationMonths ?? null,
       },
     });
     this.platformEvents.emit('subscription_request.created', {

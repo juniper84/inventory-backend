@@ -52,16 +52,21 @@ export class StockController {
       branchId?: string;
       variantId?: string;
       type?: string;
+      types?: string;
       actorId?: string;
       search?: string;
       reason?: string;
       from?: string;
       to?: string;
+      includeTotal?: string;
     },
   ) {
     const typedQuery = {
       ...query,
       type: query.type as StockMovementType | undefined,
+      types: query.types
+        ? (query.types.split(',') as StockMovementType[])
+        : undefined,
     };
     return this.stockService.listMovements(
       requireBusinessId(req),
@@ -146,6 +151,8 @@ export class StockController {
       countedQuantity: number;
       unitId?: string;
       reason?: string;
+      shortageReason?: string;
+      surplusReason?: string;
       batchId?: string;
       idempotencyKey?: string;
     },
@@ -170,6 +177,19 @@ export class StockController {
       req.user?.roleIds || [],
       body,
     );
+  }
+
+  @Post('batches/generate-code')
+  @Permissions(PermissionsList.STOCK_WRITE)
+  async generateBatchCode(
+    @Req() req: { user?: { businessId: string } },
+    @Body() body: { branchId: string },
+  ) {
+    const businessId = requireBusinessId(req);
+    if (!body.branchId) {
+      throw new BadRequestException('branchId is required.');
+    }
+    return { code: await this.stockService.generateBatchCode(businessId, body.branchId) };
   }
 
   @Post('batches')

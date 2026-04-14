@@ -270,6 +270,12 @@ export class NotificationsService {
   }
 
   async getActiveAnnouncement(businessId?: string) {
+    // Kept for backwards compatibility — returns just the newest matching one.
+    const all = await this.getActiveAnnouncements(businessId);
+    return all[0] ?? null;
+  }
+
+  async getActiveAnnouncements(businessId?: string) {
     const now = new Date();
     const subscription = businessId
       ? await this.prisma.subscription.findUnique({
@@ -300,13 +306,18 @@ export class NotificationsService {
         segmentTargets: { some: { type: 'STATUS', value: status } },
       });
     }
-    return this.prisma.platformAnnouncement.findFirst({
+    return this.prisma.platformAnnouncement.findMany({
       where: {
         startsAt: { lte: now },
         OR: [{ endsAt: null }, { endsAt: { gte: now } }],
         AND: [{ OR: targetFilters }],
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [
+        // SECURITY > WARNING > INFO via natural string sort works backwards;
+        // sort by createdAt desc and let the frontend resort if needed.
+        { createdAt: 'desc' },
+      ],
+      take: 50,
     });
   }
 

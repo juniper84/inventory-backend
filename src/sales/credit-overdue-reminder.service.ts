@@ -42,6 +42,7 @@ export class CreditOverdueReminderService
       select: {
         id: true,
         businessId: true,
+        branchId: true,
         customerNameSnapshot: true,
         outstandingAmount: true,
         creditDueDate: true,
@@ -98,6 +99,7 @@ export class CreditOverdueReminderService
       await this.auditService.logEvent({
         businessId: sale.businessId,
         userId: 'cron', // scheduled background job — no human actor
+        branchId: sale.branchId,
         action: 'CREDIT_OVERDUE_REMINDER',
         resourceType: 'Sale',
         resourceId: sale.id,

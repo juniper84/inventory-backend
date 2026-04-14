@@ -10,6 +10,7 @@ import { SubscriptionService } from './subscription.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
 import { requireBusinessId, requireUserId } from '../common/request-context';
+import { SubscriptionBypass } from './subscription.guard';
 
 @Controller('subscription')
 export class SubscriptionController {
@@ -32,18 +33,23 @@ export class SubscriptionController {
   }
 
   @Post('requests')
+  @SubscriptionBypass()
   @Permissions(PermissionsList.SUBSCRIPTION_REQUEST)
   createRequest(
     @Req() req: { user?: { businessId?: string; sub?: string } },
     @Body()
     body: {
-      type: 'UPGRADE' | 'DOWNGRADE' | 'CANCEL';
+      type: 'UPGRADE' | 'DOWNGRADE' | 'CANCEL' | 'SUBSCRIBE';
       requestedTier?: 'STARTER' | 'BUSINESS' | 'ENTERPRISE';
       reason?: string;
+      requestedDurationMonths?: number;
     },
   ) {
     if (!body.type) {
       throw new BadRequestException('type is required.');
+    }
+    if (body.type === 'DOWNGRADE') {
+      throw new BadRequestException('Downgrade requests are not supported.');
     }
     return this.subscriptionService.createSubscriptionRequest(
       requireBusinessId(req),

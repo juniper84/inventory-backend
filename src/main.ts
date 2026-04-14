@@ -36,6 +36,13 @@ async function bootstrap() {
   const allowedOrigins = new Set<string>();
   if (process.env.FRONTEND_URL) allowedOrigins.add(process.env.FRONTEND_URL);
   if (process.env.APP_BASE_URL) allowedOrigins.add(process.env.APP_BASE_URL);
+  // Marketing site origins — comma-separated list (supports apex + www, etc.)
+  if (process.env.MARKETING_URLS) {
+    for (const url of process.env.MARKETING_URLS.split(',')) {
+      const trimmed = url.trim();
+      if (trimmed) allowedOrigins.add(trimmed);
+    }
+  }
   if (process.env.NODE_ENV !== 'production') {
     allowedOrigins.add('http://localhost:3000');
     allowedOrigins.add('http://localhost:3001');

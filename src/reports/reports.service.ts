@@ -272,6 +272,7 @@ export class ReportsService {
         adjustmentGains: number;
         stockCountShortages: number;
         stockCountSurpluses: number;
+        stockCosts: number;
         expenses: number;
         transferFees: number;
         netProfit: number;
@@ -288,6 +289,7 @@ export class ReportsService {
           adjustmentGains: 0,
           stockCountShortages: 0,
           stockCountSurpluses: 0,
+          stockCosts: 0,
           expenses: 0,
           transferFees: 0,
           netProfit: 0,
@@ -374,31 +376,7 @@ export class ReportsService {
       bucket.losses += Number(entry.totalCost ?? 0);
     });
 
-    // Gain entries from positive stock adjustments
-    const gainTotals = await this.prisma.gainEntry.aggregate({
-      where: {
-        businessId,
-        ...branchFilter,
-        ...(dateFilter ? { createdAt: dateFilter } : {}),
-      },
-      _sum: { totalCost: true },
-    });
-
-    const gainEntries = await this.prisma.gainEntry.findMany({
-      where: {
-        businessId,
-        ...branchFilter,
-        ...(dateFilter ? { createdAt: dateFilter } : {}),
-      },
-      select: { totalCost: true, createdAt: true },
-    });
-    gainEntries.forEach((entry) => {
-      const dayKey = this.toDayKey(entry.createdAt);
-      const bucket = ensureDay(dayKey);
-      bucket.adjustmentGains += Number(entry.totalCost ?? 0);
-    });
-
-    // Stock count variance costs (shortages and surpluses)
+    // Stock count variance costs (shortages only — surpluses do not affect profit)
     const varianceCostEntries = await this.prisma.stockCountVarianceCost.findMany({
       where: {
         businessId,
@@ -409,24 +387,19 @@ export class ReportsService {
     });
 
     let stockCountShortagesTotal = 0;
-    let stockCountSurplusesTotal = 0;
     varianceCostEntries.forEach((entry) => {
+      if (entry.varianceType !== 'SHORTAGE') return;
       const dayKey = this.toDayKey(entry.createdAt);
       const bucket = ensureDay(dayKey);
       const cost = Number(entry.totalCost ?? 0);
-      if (entry.varianceType === 'SHORTAGE') {
-        stockCountShortagesTotal += cost;
-        bucket.stockCountShortages += cost;
-      } else {
-        stockCountSurplusesTotal += cost;
-        bucket.stockCountSurpluses += cost;
-      }
+      stockCountShortagesTotal += cost;
+      bucket.stockCountShortages += cost;
     });
 
     const expenseTotals = await this.prisma.expense.aggregate({
       where: {
         businessId,
-        category: { not: 'TRANSFER_FEE' },
+        category: { notIn: ['TRANSFER_FEE', 'STOCK_COST'] },
         ...branchFilter,
         ...(dateFilter ? { expenseDate: dateFilter } : {}),
       },
@@ -437,6 +410,16 @@ export class ReportsService {
       where: {
         businessId,
         category: 'TRANSFER_FEE',
+        ...branchFilter,
+        ...(dateFilter ? { expenseDate: dateFilter } : {}),
+      },
+      _sum: { amount: true },
+    });
+
+    const stockCostTotals = await this.prisma.expense.aggregate({
+      where: {
+        businessId,
+        category: 'STOCK_COST',
         ...branchFilter,
         ...(dateFilter ? { expenseDate: dateFilter } : {}),
       },
@@ -457,6 +440,8 @@ export class ReportsService {
       const amount = Number(entry.amount ?? 0);
       if (entry.category === 'TRANSFER_FEE') {
         bucket.transferFees += amount;
+      } else if (entry.category === 'STOCK_COST') {
+        bucket.stockCosts += amount;
       } else {
         bucket.expenses += amount;
       }
@@ -466,24 +451,22 @@ export class ReportsService {
       bucket.netProfit =
         bucket.grossProfit -
         bucket.losses -
-        bucket.stockCountShortages +
-        bucket.adjustmentGains +
-        bucket.stockCountSurpluses -
+        bucket.stockCountShortages -
+        bucket.stockCosts -
         bucket.expenses -
         bucket.transferFees;
     });
 
     const refunds = refundTotals.revenue;
     const losses = Number(lossTotals._sum.totalCost ?? 0);
-    const adjustmentGains = Number(gainTotals._sum.totalCost ?? 0);
-    const expenses = Number(expenseTotals._sum.amount ?? 0);
+    const expenses = Number(expenseTotals._sum?.amount ?? 0);
+    const stockCosts = Number(stockCostTotals._sum?.amount ?? 0);
     const transferFees = Number(transferFeeTotals._sum.amount ?? 0);
     const netProfit =
       totals.grossProfit -
       losses -
-      stockCountShortagesTotal +
-      adjustmentGains +
-      stockCountSurplusesTotal -
+      stockCountShortagesTotal -
+      stockCosts -
       expenses -
       transferFees;
     return {
@@ -495,9 +478,10 @@ export class ReportsService {
         ...totals,
         refunds,
         losses,
-        adjustmentGains,
+        adjustmentGains: 0,
         stockCountShortages: stockCountShortagesTotal,
-        stockCountSurpluses: stockCountSurplusesTotal,
+        stockCountSurpluses: 0,
+        stockCosts,
         expenses,
         transferFees,
         netProfit,
@@ -1187,6 +1171,7 @@ export class ReportsService {
         take,
         select: {
           id: true,
+          referenceNumber: true,
           total: true,
           createdAt: true,
           branch: { select: { name: true } },
@@ -1201,6 +1186,7 @@ export class ReportsService {
         take,
         select: {
           id: true,
+          referenceNumber: true,
           status: true,
           createdAt: true,
           sourceBranch: { select: { name: true } },

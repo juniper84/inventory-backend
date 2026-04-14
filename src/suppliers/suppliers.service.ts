@@ -149,4 +149,31 @@ export class SuppliersService {
 
     return updated;
   }
+
+  async getSupplierPerformance(businessId: string, supplierId: string) {
+    const supplier = await this.prisma.supplier.findFirst({
+      where: { id: supplierId, businessId },
+      select: { id: true },
+    });
+    if (!supplier) {
+      return null;
+    }
+    const [totalOrders, fullyReceivedOrders, closedOrders] = await Promise.all([
+      this.prisma.purchaseOrder.count({
+        where: { businessId, supplierId },
+      }),
+      this.prisma.purchaseOrder.count({
+        where: { businessId, supplierId, status: PurchaseStatus.FULLY_RECEIVED },
+      }),
+      this.prisma.purchaseOrder.count({
+        where: { businessId, supplierId, status: PurchaseStatus.CLOSED },
+      }),
+    ]);
+    const completedOrders = fullyReceivedOrders + closedOrders;
+    return {
+      totalOrders,
+      completedOrders,
+      completionRate: totalOrders > 0 ? completedOrders / totalOrders : 0,
+    };
+  }
 }

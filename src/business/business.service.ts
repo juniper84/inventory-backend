@@ -50,207 +50,239 @@ export class BusinessService {
     // Wrap all core business creation writes in a single atomic transaction so
     // that a failure at any step leaves no orphaned partial records
     const { business, branch, roleMap } = await this.prisma.$transaction(
-      async (tx) => {
-        const business = await tx.business.create({
-          data: {
-            name: data.name,
-            defaultLanguage: data.defaultLanguage ?? 'en',
-            status: 'TRIAL',
-          },
-        });
-
-        const branch = await tx.branch.create({
-          data: {
-            businessId: business.id,
-            name: 'Main Branch',
-            isDefault: true,
-          },
-        });
-
-        await tx.businessSettings.create({
-          data: {
-            businessId: business.id,
-            approvalDefaults: DEFAULT_APPROVAL_DEFAULTS,
-            notificationDefaults: DEFAULT_NOTIFICATION_SETTINGS,
-            stockPolicies: DEFAULT_STOCK_POLICIES,
-            posPolicies: DEFAULT_POS_POLICIES,
-            localeSettings: DEFAULT_LOCALE_SETTINGS,
-            onboarding: DEFAULT_ONBOARDING,
-          },
-        });
-
-        // Inline seedDefaultRoles using the tx client
-        const systemRoles: Array<{ name: string; approvalTier: number }> = [
-          { name: 'System Owner', approvalTier: 3 },
-          { name: 'Admin', approvalTier: 2 },
-          { name: 'Manager', approvalTier: 1 },
-          { name: 'Employee', approvalTier: 0 },
-          { name: 'Cashier', approvalTier: 0 },
-        ];
-        const roles = await Promise.all(
-          systemRoles.map(({ name, approvalTier }) =>
-            tx.role.create({
-              data: { businessId: business.id, name, isSystem: true, approvalTier },
-            }),
-          ),
-        );
-
-        const permissions = await tx.permission.findMany({
-          where: { code: { in: Object.values(PermissionsList) } },
-        });
-
-        const permissionByCode = new Map(
-          permissions.map((perm) => [perm.code, perm.id]),
-        );
-        const resolveIds = (codes: string[]): string[] =>
-          codes.flatMap((code) => {
-            const id = permissionByCode.get(code);
-            return id ? [id] : [];
-          });
-        const adminForbidden = new Set<string>(ADMIN_FORBIDDEN_PERMISSIONS);
-        const rolePermissionsMap: Record<string, string[]> = {
-          'System Owner': permissions.map((perm) => perm.id),
-          Admin: permissions
-            .filter((perm) => !adminForbidden.has(perm.code))
-            .map((perm) => perm.id),
-          Manager: resolveIds(MANAGER_PERMISSIONS),
-          Employee: resolveIds(EMPLOYEE_PERMISSIONS),
-          Cashier: resolveIds(CASHIER_PERMISSIONS),
-        };
-        await Promise.all(
-          roles.map((role) => {
-            const permissionIds = rolePermissionsMap[role.name] || [];
-            return tx.rolePermission.createMany({
-              data: permissionIds.map((permissionId) => ({
-                roleId: role.id,
-                permissionId,
-              })),
-              skipDuplicates: true,
-            });
-          }),
-        );
-        const roleMap = roles.reduce<Record<string, string>>((acc, role) => {
-          acc[role.name] = role.id;
-          return acc;
-        }, {});
-
-        // Approval policies
-        const approvalDefaults = DEFAULT_APPROVAL_DEFAULTS;
-        const approvalPolicies = [
-          {
-            businessId: business.id,
-            actionType: 'BARCODE_REASSIGN',
-            thresholdType: 'NONE',
-            requiredRoleIds: [],
-            allowSelfApprove: false,
-          },
-          {
-            businessId: business.id,
-            actionType: 'SKU_REASSIGN',
-            thresholdType: 'NONE',
-            requiredRoleIds: [],
-            allowSelfApprove: false,
-          },
-        ] as Array<{
-          businessId: string;
-          actionType: string;
-          thresholdType: 'NONE' | 'PERCENT' | 'AMOUNT';
-          thresholdValue?: number | null;
-          requiredRoleIds: string[];
-          allowSelfApprove: boolean;
-        }>;
-        const buildAmountPolicy = (
-          actionType: string,
-          threshold?: number | null,
-        ) =>
-          ({
-            businessId: business.id,
-            actionType,
-            thresholdType:
-              typeof threshold === 'number' && threshold > 0 ? 'AMOUNT' : 'NONE',
-            thresholdValue:
-              typeof threshold === 'number' && threshold > 0 ? threshold : null,
-            requiredRoleIds: [],
-            allowSelfApprove: false,
-          }) satisfies (typeof approvalPolicies)[number];
-
-        const discountThresholdPercent =
-          approvalDefaults.discountThresholdPercent;
-        const discountThresholdAmount = approvalDefaults.discountThresholdAmount;
-        if (
-          (typeof discountThresholdPercent === 'number' &&
-            discountThresholdPercent > 0) ||
-          (typeof discountThresholdAmount === 'number' &&
-            discountThresholdAmount > 0)
-        ) {
-          approvalPolicies.push({
-            businessId: business.id,
-            actionType: 'SALE_DISCOUNT',
-            thresholdType:
-              typeof discountThresholdPercent === 'number' &&
-              discountThresholdPercent > 0
-                ? 'PERCENT'
-                : 'AMOUNT',
-            thresholdValue:
-              typeof discountThresholdPercent === 'number' &&
-              discountThresholdPercent > 0
-                ? discountThresholdPercent
-                : (discountThresholdAmount ?? null),
-            requiredRoleIds: [],
-            allowSelfApprove: false,
-          });
-        }
-        if (approvalDefaults.refund) {
-          approvalPolicies.push(
-            buildAmountPolicy('SALE_REFUND', approvalDefaults.refundThresholdAmount),
-            buildAmountPolicy('RETURN_WITHOUT_RECEIPT', approvalDefaults.refundThresholdAmount),
-          );
-        }
-        if (approvalDefaults.stockAdjust) {
-          approvalPolicies.push(
-            buildAmountPolicy('STOCK_ADJUSTMENT', approvalDefaults.stockAdjustThresholdAmount),
-            buildAmountPolicy('STOCK_COUNT', approvalDefaults.stockAdjustThresholdAmount),
-          );
-        }
-        if (approvalDefaults.transfer) {
-          approvalPolicies.push(
-            buildAmountPolicy('TRANSFER_APPROVAL', approvalDefaults.transferThresholdAmount),
-          );
-        }
-        if (approvalDefaults.purchase) {
-          approvalPolicies.push(
-            buildAmountPolicy('PURCHASE_CREATE', approvalDefaults.purchaseThresholdAmount),
-            buildAmountPolicy('PURCHASE_ORDER_APPROVAL', approvalDefaults.purchaseThresholdAmount),
-            buildAmountPolicy('PURCHASE_ORDER_EDIT', approvalDefaults.purchaseThresholdAmount),
-            buildAmountPolicy('SUPPLIER_RETURN', approvalDefaults.purchaseThresholdAmount),
-          );
-        }
-        if (approvalDefaults.expense) {
-          approvalPolicies.push(
-            buildAmountPolicy('EXPENSE_CREATE', approvalDefaults.expenseThresholdAmount),
-          );
-        }
-
-        await tx.approvalPolicy.createMany({
-          data: approvalPolicies,
-          skipDuplicates: true,
-        });
-
-        return { business, branch, roleMap };
-      },
+      async (tx) => this.createBusinessWithTx(tx, data),
       { timeout: 15000 },
     );
 
-    // Subscription creation and audit events run after the transaction commits.
-    // Residual risk: if createTrialSubscription fails, the business record exists
-    // without a subscription — recoverable by a platform admin retry, and a much
-    // narrower window than before where all 7+ steps were non-atomic.
-    const actorId = data.actorId ?? 'background';
-    await this.subscriptionService.createTrialSubscription(
-      business.id,
-      data.tier ?? SubscriptionTier.BUSINESS,
-      actorId,
+    // Post-transaction work (subscription + audit)
+    return this.afterBusinessCreated({ business, branch, roleMap }, data);
+  }
+
+  /**
+   * Creates a business inside an existing transaction. Use this when the caller
+   * already manages the outer transaction (e.g. atomic signup).
+   */
+  async createBusinessWithTx(
+    tx: Parameters<Parameters<PrismaService['$transaction']>[0]>[0],
+    data: {
+      name: string;
+      defaultLanguage?: string;
+      tier?: SubscriptionTier;
+      actorId?: string;
+    },
+  ) {
+    const business = await tx.business.create({
+      data: {
+        name: data.name,
+        defaultLanguage: data.defaultLanguage ?? 'en',
+        status: 'TRIAL',
+      },
+    });
+
+    const branch = await tx.branch.create({
+      data: {
+        businessId: business.id,
+        name: 'Main Branch',
+        isDefault: true,
+      },
+    });
+
+    await tx.businessSettings.create({
+      data: {
+        businessId: business.id,
+        approvalDefaults: DEFAULT_APPROVAL_DEFAULTS,
+        notificationDefaults: DEFAULT_NOTIFICATION_SETTINGS,
+        stockPolicies: DEFAULT_STOCK_POLICIES,
+        posPolicies: DEFAULT_POS_POLICIES,
+        localeSettings: DEFAULT_LOCALE_SETTINGS,
+        onboarding: DEFAULT_ONBOARDING,
+      },
+    });
+
+    // Inline seedDefaultRoles using the tx client
+    const systemRoles: Array<{ name: string; approvalTier: number }> = [
+      { name: 'System Owner', approvalTier: 3 },
+      { name: 'Admin', approvalTier: 2 },
+      { name: 'Manager', approvalTier: 1 },
+      { name: 'Employee', approvalTier: 0 },
+      { name: 'Cashier', approvalTier: 0 },
+    ];
+    const roles = await Promise.all(
+      systemRoles.map(({ name, approvalTier }) =>
+        tx.role.create({
+          data: { businessId: business.id, name, isSystem: true, approvalTier },
+        }),
+      ),
     );
+
+    const permissions = await tx.permission.findMany({
+      where: { code: { in: Object.values(PermissionsList) } },
+    });
+
+    const permissionByCode = new Map(
+      permissions.map((perm) => [perm.code, perm.id]),
+    );
+    const resolveIds = (codes: string[]): string[] =>
+      codes.flatMap((code) => {
+        const id = permissionByCode.get(code);
+        return id ? [id] : [];
+      });
+    const adminForbidden = new Set<string>(ADMIN_FORBIDDEN_PERMISSIONS);
+    const rolePermissionsMap: Record<string, string[]> = {
+      'System Owner': permissions.map((perm) => perm.id),
+      Admin: permissions
+        .filter((perm) => !adminForbidden.has(perm.code))
+        .map((perm) => perm.id),
+      Manager: resolveIds(MANAGER_PERMISSIONS),
+      Employee: resolveIds(EMPLOYEE_PERMISSIONS),
+      Cashier: resolveIds(CASHIER_PERMISSIONS),
+    };
+    await Promise.all(
+      roles.map((role) => {
+        const permissionIds = rolePermissionsMap[role.name] || [];
+        return tx.rolePermission.createMany({
+          data: permissionIds.map((permissionId) => ({
+            roleId: role.id,
+            permissionId,
+          })),
+          skipDuplicates: true,
+        });
+      }),
+    );
+    const roleMap = roles.reduce<Record<string, string>>((acc, role) => {
+      acc[role.name] = role.id;
+      return acc;
+    }, {});
+
+    // Approval policies
+    const approvalDefaults = DEFAULT_APPROVAL_DEFAULTS;
+    const approvalPolicies = [
+      {
+        businessId: business.id,
+        actionType: 'BARCODE_REASSIGN',
+        thresholdType: 'NONE',
+        requiredRoleIds: [],
+        allowSelfApprove: false,
+      },
+      {
+        businessId: business.id,
+        actionType: 'SKU_REASSIGN',
+        thresholdType: 'NONE',
+        requiredRoleIds: [],
+        allowSelfApprove: false,
+      },
+    ] as Array<{
+      businessId: string;
+      actionType: string;
+      thresholdType: 'NONE' | 'PERCENT' | 'AMOUNT';
+      thresholdValue?: number | null;
+      requiredRoleIds: string[];
+      allowSelfApprove: boolean;
+    }>;
+    const buildAmountPolicy = (
+      actionType: string,
+      threshold?: number | null,
+    ) =>
+      ({
+        businessId: business.id,
+        actionType,
+        thresholdType:
+          typeof threshold === 'number' && threshold > 0 ? 'AMOUNT' : 'NONE',
+        thresholdValue:
+          typeof threshold === 'number' && threshold > 0 ? threshold : null,
+        requiredRoleIds: [],
+        allowSelfApprove: false,
+      }) satisfies (typeof approvalPolicies)[number];
+
+    const discountThresholdPercent =
+      approvalDefaults.discountThresholdPercent;
+    const discountThresholdAmount = approvalDefaults.discountThresholdAmount;
+    if (
+      (typeof discountThresholdPercent === 'number' &&
+        discountThresholdPercent > 0) ||
+      (typeof discountThresholdAmount === 'number' &&
+        discountThresholdAmount > 0)
+    ) {
+      approvalPolicies.push({
+        businessId: business.id,
+        actionType: 'SALE_DISCOUNT',
+        thresholdType:
+          typeof discountThresholdPercent === 'number' &&
+          discountThresholdPercent > 0
+            ? 'PERCENT'
+            : 'AMOUNT',
+        thresholdValue:
+          typeof discountThresholdPercent === 'number' &&
+          discountThresholdPercent > 0
+            ? discountThresholdPercent
+            : (discountThresholdAmount ?? null),
+        requiredRoleIds: [],
+        allowSelfApprove: false,
+      });
+    }
+    if (approvalDefaults.refund) {
+      approvalPolicies.push(
+        buildAmountPolicy('SALE_REFUND', approvalDefaults.refundThresholdAmount),
+        buildAmountPolicy('RETURN_WITHOUT_RECEIPT', approvalDefaults.refundThresholdAmount),
+      );
+    }
+    if (approvalDefaults.stockAdjust) {
+      approvalPolicies.push(
+        buildAmountPolicy('STOCK_ADJUSTMENT', approvalDefaults.stockAdjustThresholdAmount),
+        buildAmountPolicy('STOCK_COUNT', approvalDefaults.stockAdjustThresholdAmount),
+      );
+    }
+    if (approvalDefaults.transfer) {
+      approvalPolicies.push(
+        buildAmountPolicy('TRANSFER_APPROVAL', approvalDefaults.transferThresholdAmount),
+      );
+    }
+    if (approvalDefaults.purchase) {
+      approvalPolicies.push(
+        buildAmountPolicy('PURCHASE_CREATE', approvalDefaults.purchaseThresholdAmount),
+        buildAmountPolicy('PURCHASE_ORDER_APPROVAL', approvalDefaults.purchaseThresholdAmount),
+        buildAmountPolicy('PURCHASE_ORDER_EDIT', approvalDefaults.purchaseThresholdAmount),
+        buildAmountPolicy('SUPPLIER_RETURN', approvalDefaults.purchaseThresholdAmount),
+      );
+    }
+    if (approvalDefaults.expense) {
+      approvalPolicies.push(
+        buildAmountPolicy('EXPENSE_CREATE', approvalDefaults.expenseThresholdAmount),
+      );
+    }
+
+    await tx.approvalPolicy.createMany({
+      data: approvalPolicies,
+      skipDuplicates: true,
+    });
+
+    return { business, branch, roleMap };
+  }
+
+  /**
+   * Post-transaction work: subscription creation and audit logging.
+   * Called after the business creation transaction commits.
+   */
+  async afterBusinessCreated(
+    result: {
+      business: { id: string; name: string };
+      branch: { id: string };
+      roleMap: Record<string, string>;
+    },
+    data: { tier?: SubscriptionTier; actorId?: string; skipSubscription?: boolean },
+  ) {
+    const { business, branch, roleMap } = result;
+    const actorId = data.actorId ?? 'background';
+
+    // Subscription may already be created inside the transaction (e.g. signup flow).
+    // Skip if the caller signals it was already handled.
+    if (!data.skipSubscription) {
+      await this.subscriptionService.createTrialSubscription(
+        business.id,
+        data.tier ?? SubscriptionTier.BUSINESS,
+        actorId,
+      );
+    }
 
     await this.auditService.logEvent({
       businessId: business.id,
@@ -385,6 +417,8 @@ export class BusinessService {
       after: updated as unknown as Record<string, unknown>,
     });
 
+    // Revoke refresh tokens scoped to this business (uses businessId column).
+    // Also revoke tokens without a businessId for users of this business (legacy tokens).
     const userIds = await this.prisma.businessUser
       .findMany({
         where: { businessId },
@@ -393,7 +427,13 @@ export class BusinessService {
       .then((rows) => rows.map((row) => row.userId));
     if (userIds.length) {
       await this.prisma.refreshToken.updateMany({
-        where: { userId: { in: userIds }, revokedAt: null },
+        where: {
+          revokedAt: null,
+          OR: [
+            { businessId },
+            { userId: { in: userIds }, businessId: null },
+          ],
+        },
         data: { revokedAt: new Date() },
       });
     }
@@ -420,6 +460,11 @@ export class BusinessService {
     });
 
     return updated;
+  }
+
+  /** Public wrapper so AuthService can call seedPermissions before a shared transaction. */
+  async ensurePermissionsSeeded() {
+    return this.seedPermissions();
   }
 
   private async seedPermissions() {

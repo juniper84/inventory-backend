@@ -52,7 +52,51 @@ export class BranchesService {
       orderBy: { createdAt: 'desc' },
       ...pagination,
     });
-    return buildPaginatedResponse(items, pagination.take);
+
+    // Enrich with active user count per branch
+    const branchIds = items.map((b) => b.id);
+    const userCounts = branchIds.length
+      ? await this.prisma.userRole.groupBy({
+          by: ['branchId'],
+          where: { branchId: { in: branchIds }, role: { businessId } },
+          _count: { userId: true },
+        })
+      : [];
+    const userCountMap = new Map(
+      userCounts.map((uc) => [uc.branchId, uc._count.userId]),
+    );
+    const enriched = items.map((item) => ({
+      ...item,
+      activeUserCount: userCountMap.get(item.id) ?? 0,
+    }));
+
+    return buildPaginatedResponse(enriched, pagination.take);
+  }
+
+  async getBranchPerformance(businessId: string, branchId: string) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const [salesToday, stockValue] = await Promise.all([
+      this.prisma.sale.aggregate({
+        where: {
+          businessId,
+          branchId,
+          status: 'COMPLETED',
+          createdAt: { gte: today },
+        },
+        _sum: { total: true },
+        _count: { id: true },
+      }),
+      this.prisma.stockSnapshot.aggregate({
+        where: { businessId, branchId },
+        _sum: { quantity: true },
+      }),
+    ]);
+    return {
+      salesToday: Number(salesToday._sum.total ?? 0),
+      saleCount: salesToday._count.id,
+      stockUnits: Number(stockValue._sum.quantity ?? 0),
+    };
   }
 
   async create(
@@ -98,6 +142,8 @@ export class BranchesService {
       address?: string;
       phone?: string;
       priceListId?: string | null;
+      openingTime?: string | null;
+      closingTime?: string | null;
     },
   ) {
     const before = await this.prisma.branch.findFirst({
@@ -114,6 +160,10 @@ export class BranchesService {
         phone: data.phone ?? undefined,
         priceListId:
           data.priceListId === undefined ? undefined : data.priceListId,
+        openingTime:
+          data.openingTime === undefined ? undefined : data.openingTime,
+        closingTime:
+          data.closingTime === undefined ? undefined : data.closingTime,
       },
     });
     const result = (await this.prisma.branch.findFirst({

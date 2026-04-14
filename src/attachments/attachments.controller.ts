@@ -16,6 +16,7 @@ export class AttachmentsController {
     body: {
       purchaseId?: string;
       purchaseOrderId?: string;
+      supplierReturnId?: string;
       filename: string;
       storageKey?: string;
       url: string;
@@ -41,6 +42,7 @@ export class AttachmentsController {
       cursor?: string;
       purchaseId?: string;
       purchaseOrderId?: string;
+      supplierReturnId?: string;
     },
   ) {
     return this.attachmentsService.list(
@@ -58,6 +60,7 @@ export class AttachmentsController {
     body: {
       purchaseId?: string;
       purchaseOrderId?: string;
+      supplierReturnId?: string;
       filename: string;
       mimeType?: string;
     },
@@ -66,6 +69,30 @@ export class AttachmentsController {
       requireBusinessId(req),
       body,
       req.user?.branchScope ?? [],
+    );
+  }
+
+  @Post('bulk-download')
+  @Permissions(PermissionsList.ATTACHMENTS_READ)
+  bulkDownload(
+    @Req() req: { user?: { businessId: string } },
+    @Body() body: { attachmentIds: string[] },
+  ) {
+    return this.attachmentsService.bulkDownload(
+      requireBusinessId(req),
+      body.attachmentIds ?? [],
+    );
+  }
+
+  @Get(':id/versions')
+  @Permissions(PermissionsList.ATTACHMENTS_READ)
+  listVersions(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.attachmentsService.listVersions(
+      requireBusinessId(req),
+      id,
     );
   }
 

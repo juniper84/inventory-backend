@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { IS_PUBLIC_KEY } from '../auth/public.decorator';
+import { SUBSCRIPTION_BYPASS_KEY } from '../subscription/subscription.guard';
 import { buildRequestMetadata } from '../audit/audit.utils';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -36,6 +37,14 @@ export class ReadOnlyGuard implements CanActivate {
       context.getClass(),
     ]);
     if (isPublic) {
+      return true;
+    }
+
+    const bypass = this.reflector.getAllAndOverride<boolean>(
+      SUBSCRIPTION_BYPASS_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    if (bypass) {
       return true;
     }
 

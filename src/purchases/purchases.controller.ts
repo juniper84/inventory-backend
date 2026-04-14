@@ -256,6 +256,16 @@ export class PurchasesController {
     );
   }
 
+  @Get('supplier-returns/rates')
+  @Permissions(PermissionsList.PURCHASES_READ)
+  getSupplierReturnRates(
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.purchasesService.getSupplierReturnRates(
+      requireBusinessId(req),
+    );
+  }
+
   @Get('supplier-returns')
   @Permissions(PermissionsList.PURCHASES_READ)
   listSupplierReturns(

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -64,14 +65,17 @@ type QueueStatusCounts = Record<string, number>;
 type QueueSummary = {
   support: {
     total: number;
+    actionable: number;
     byStatus: QueueStatusCounts;
   };
   exports: {
     total: number;
+    actionable: number;
     byStatus: QueueStatusCounts;
   };
   subscriptions: {
     total: number;
+    actionable: number;
     byStatus: QueueStatusCounts;
   };
 };
@@ -147,6 +151,8 @@ const INCIDENT_STATUS_TRANSITIONS: Record<
 
 @Injectable()
 export class PlatformService {
+  private readonly logger = new Logger(PlatformService.name);
+
   constructor(
     private readonly businessService: BusinessService,
     private readonly usersService: UsersService,
@@ -335,28 +341,241 @@ export class PlatformService {
     actorId?: string;
   }) {
     const actorId = data.actorId ?? 'platform';
-    const { business, roles } = await this.businessService.createBusiness({
-      name: data.businessName,
-      tier: data.tier,
-      actorId,
-    });
+    const passwordHash = hashPassword(data.ownerTempPassword);
 
-    const owner = await this.usersService.create(business.id, actorId, {
-      name: data.ownerName,
-      email: data.ownerEmail,
-      status: 'PENDING',
-      tempPassword: data.ownerTempPassword,
-      mustResetPassword: true,
-    });
+    // seedPermissions is idempotent — safe to call outside the transaction
+    await this.businessService.ensurePermissionsSeeded();
 
-    const systemOwnerRoleId = roles['System Owner'];
-    if (systemOwnerRoleId) {
-      await this.usersService.assignRole(owner.id, systemOwnerRoleId);
+    const txResult = await this.prisma.$transaction(
+      async (tx) => {
+        // 1. Create business atomically
+        const { business, branch, roleMap } =
+          await this.businessService.createBusinessWithTx(tx, {
+            name: data.businessName,
+            tier: data.tier,
+            actorId,
+          });
+
+        // 2. Create (or link) the owner user
+        const userResult = await this.usersService.createWithTx(
+          tx,
+          business.id,
+          {
+            name: data.ownerName,
+            email: data.ownerEmail,
+            status: 'PENDING',
+            tempPassword: data.ownerTempPassword,
+            mustResetPassword: true,
+          },
+          passwordHash,
+        );
+
+        // 3. Assign System Owner role
+        const systemOwnerRoleId = roleMap['System Owner'];
+        if (systemOwnerRoleId) {
+          await this.usersService.assignRole(
+            userResult.user.id,
+            systemOwnerRoleId,
+            null,
+            tx,
+          );
+        }
+
+        return {
+          business,
+          branch,
+          roleMap,
+          owner: userResult.user,
+          isExistingUser: userResult.isExistingUser,
+        };
+      },
+      { timeout: 15000 },
+    );
+
+    // Post-transaction work: subscription + audit
+    await this.businessService.afterBusinessCreated(
+      {
+        business: txResult.business,
+        branch: txResult.branch,
+        roleMap: txResult.roleMap,
+      },
+      { tier: data.tier, actorId },
+    );
+
+    // Only send verification email for new users
+    if (!txResult.isExistingUser) {
+      await this.authService.requestEmailVerification(
+        txResult.owner.id,
+        txResult.business.id,
+      );
     }
 
-    await this.authService.requestEmailVerification(owner.id, business.id);
+    return { business: txResult.business, owner: txResult.owner };
+  }
 
-    return { business, owner };
+  async getBusinessesCounts() {
+    const grouped = await this.prisma.business.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+    });
+    const underReview = await this.prisma.business.count({
+      where: { underReview: true },
+    });
+    const counts: Record<string, number> = {
+      TRIAL: 0,
+      ACTIVE: 0,
+      GRACE: 0,
+      EXPIRED: 0,
+      SUSPENDED: 0,
+      ARCHIVED: 0,
+      DELETED: 0,
+    };
+    let total = 0;
+    for (const row of grouped) {
+      counts[row.status] = row._count._all;
+      total += row._count._all;
+    }
+    return { total, byStatus: counts, underReview };
+  }
+
+  async getBusinessActivityHeatmap(businessId: string, days: number) {
+    const now = new Date();
+    const start = new Date(now);
+    start.setDate(start.getDate() - days + 1);
+    start.setHours(0, 0, 0, 0);
+
+    // Verify business exists
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId },
+      select: { id: true },
+    });
+    if (!business) {
+      throw new NotFoundException('Business not found.');
+    }
+
+    const logs = await this.prisma.auditLog.findMany({
+      where: { businessId, createdAt: { gte: start } },
+      select: { createdAt: true },
+    });
+
+    // Group by date (YYYY-MM-DD)
+    const counts = new Map<string, number>();
+    for (const log of logs) {
+      const dateKey = log.createdAt.toISOString().slice(0, 10);
+      counts.set(dateKey, (counts.get(dateKey) ?? 0) + 1);
+    }
+
+    // Build full date range so missing days show as 0
+    const result: { date: string; count: number }[] = [];
+    const cursor = new Date(start);
+    while (cursor <= now) {
+      const dateKey = cursor.toISOString().slice(0, 10);
+      result.push({ date: dateKey, count: counts.get(dateKey) ?? 0 });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    const totalActivity = result.reduce((sum, d) => sum + d.count, 0);
+    const peakDay = result.reduce(
+      (peak, d) => (d.count > peak.count ? d : peak),
+      { date: '', count: 0 },
+    );
+
+    return {
+      businessId,
+      days,
+      generatedAt: now.toISOString(),
+      totalActivity,
+      peakDay,
+      data: result,
+    };
+  }
+
+  async bulkBusinessAction(params: {
+    businessIds: string[];
+    action: 'SUSPEND' | 'EXTEND_TRIAL' | 'READ_ONLY' | 'ARCHIVE';
+    params: { days?: number; reason?: string; enabled?: boolean };
+    platformAdminId: string;
+  }) {
+    const { businessIds, action, params: actionParams, platformAdminId } = params;
+
+    if (!Array.isArray(businessIds) || businessIds.length === 0) {
+      throw new BadRequestException('businessIds must be a non-empty array.');
+    }
+    if (businessIds.length > 100) {
+      throw new BadRequestException('Cannot process more than 100 businesses at once.');
+    }
+    const reason = actionParams.reason?.trim();
+    if (!reason) {
+      throw new BadRequestException('Reason is required for bulk actions.');
+    }
+
+    const results: { businessId: string; success: boolean; error?: string }[] = [];
+
+    for (const businessId of businessIds) {
+      try {
+        if (action === 'SUSPEND') {
+          await this.updateBusinessStatus(
+            businessId,
+            BusinessStatus.SUSPENDED,
+            platformAdminId,
+            reason,
+          );
+        } else if (action === 'ARCHIVE') {
+          await this.updateBusinessStatus(
+            businessId,
+            BusinessStatus.ARCHIVED,
+            platformAdminId,
+            reason,
+          );
+        } else if (action === 'READ_ONLY') {
+          await this.updateReadOnly(businessId, {
+            enabled: actionParams.enabled ?? true,
+            reason,
+            platformAdminId,
+          });
+        } else if (action === 'EXTEND_TRIAL') {
+          const days = actionParams.days ?? 7;
+          if (days <= 0 || days > 365) {
+            throw new BadRequestException('days must be between 1 and 365.');
+          }
+          // Extend trial: push trialEndsAt forward by N days
+          const subscription = await this.prisma.subscription.findUnique({
+            where: { businessId },
+          });
+          if (!subscription) {
+            throw new BadRequestException('Subscription not found.');
+          }
+          const currentEnd = subscription.trialEndsAt ?? new Date();
+          const newEnd = new Date(currentEnd);
+          newEnd.setDate(newEnd.getDate() + days);
+          await this.updateSubscription(businessId, {
+            platformAdminId,
+            trialEndsAt: newEnd,
+            reason: `${reason} (bulk extend +${days}d)`,
+          });
+        } else {
+          throw new BadRequestException(`Unsupported bulk action: ${action}`);
+        }
+        results.push({ businessId, success: true });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `Bulk action ${action} failed for business ${businessId}: ${message}`,
+        );
+        results.push({ businessId, success: false, error: message });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+    const failureCount = results.length - successCount;
+
+    return {
+      action,
+      total: results.length,
+      successCount,
+      failureCount,
+      results,
+    };
   }
 
   listBusinesses(
@@ -404,7 +623,7 @@ export class PlatformService {
       })
       .then(async (items) => {
         const businessIds = items.map((business) => business.id);
-        const [activeOfflineCounts, total, systemOwnerRoles] = await Promise.all([
+        const [activeOfflineCounts, total, systemOwnerRoles, offlineFailedRows, exportsPendingRows] = await Promise.all([
           businessIds.length
             ? this.prisma.offlineDevice.groupBy({
                 by: ['businessId'],
@@ -419,7 +638,23 @@ export class PlatformService {
                 select: { id: true, businessId: true },
               })
             : Promise.resolve([]),
+          businessIds.length
+            ? this.prisma.offlineAction.groupBy({
+                by: ['businessId'],
+                where: { businessId: { in: businessIds }, status: 'FAILED' },
+                _count: { _all: true },
+              })
+            : Promise.resolve([]),
+          businessIds.length
+            ? this.prisma.exportJob.groupBy({
+                by: ['businessId'],
+                where: { businessId: { in: businessIds }, status: 'PENDING' },
+                _count: { _all: true },
+              })
+            : Promise.resolve([]),
         ]);
+        const offlineFailedMap = new Map(offlineFailedRows.map((r): [string, number] => [r.businessId, r._count._all]));
+        const exportsPendingMap = new Map(exportsPendingRows.map((r): [string, number] => [r.businessId, r._count._all]));
 
         const roleToBusinessMap = new Map<string, string>(
           systemOwnerRoles.map((r): [string, string] => [r.id, r.businessId]),
@@ -459,6 +694,17 @@ export class PlatformService {
           const lastActivity = business.lastActivityAt
             ? business.lastActivityAt.toISOString()
             : null;
+          // Compute health score inline (same formula as getBusinessHealth)
+          const offlineFailed = offlineFailedMap.get(business.id) ?? 0;
+          const exportsPending = exportsPendingMap.get(business.id) ?? 0;
+          const subStatus = business.subscription?.status;
+          const penalty =
+            offlineFailed * 3 +
+            exportsPending * 5 +
+            (subStatus === 'EXPIRED' ? 40 : 0) +
+            (subStatus === 'GRACE' ? 15 : 0) +
+            (subStatus === 'SUSPENDED' ? 50 : 0);
+          const healthScore = Math.max(0, 100 - penalty);
           return {
             ...business,
             counts: {
@@ -468,6 +714,7 @@ export class PlatformService {
             },
             lastActivityAt: lastActivity,
             systemOwner: businessOwnerMap.get(business.id) ?? null,
+            healthScore,
           };
         });
         return buildPaginatedResponse(enriched, pagination.take, total);
@@ -583,13 +830,19 @@ export class PlatformService {
     const exportsByStatus = toStatusMap(exportsGrouped);
     const subscriptionsByStatus = toStatusMap(subscriptionsGrouped);
 
+    const supportActionable = (supportByStatus.PENDING ?? 0) + (supportByStatus.APPROVED ?? 0);
+    const exportsActionable = (exportsByStatus.PENDING ?? 0) + (exportsByStatus.RUNNING ?? 0) + (exportsByStatus.FAILED ?? 0);
+    const subscriptionsActionable = subscriptionsByStatus.PENDING ?? 0;
+
     return {
       support: {
         total: Object.values(supportByStatus).reduce((sum, value) => sum + value, 0),
+        actionable: supportActionable,
         byStatus: supportByStatus,
       },
       exports: {
         total: Object.values(exportsByStatus).reduce((sum, value) => sum + value, 0),
+        actionable: exportsActionable,
         byStatus: exportsByStatus,
       },
       subscriptions: {
@@ -597,6 +850,7 @@ export class PlatformService {
           (sum, value) => sum + value,
           0,
         ),
+        actionable: subscriptionsActionable,
         byStatus: subscriptionsByStatus,
       },
     };
@@ -651,7 +905,7 @@ export class PlatformService {
     const inactiveUsers = userCounts.INACTIVE ?? 0;
     const pendingUsers = userCounts.PENDING ?? 0;
     const queuePressureTotal =
-      queues.support.total + queues.exports.total + queues.subscriptions.total;
+      queues.support.actionable + queues.exports.actionable + queues.subscriptions.actionable;
 
     return {
       generatedAt: new Date().toISOString(),
@@ -693,8 +947,8 @@ export class PlatformService {
           { status: 'GRACE', count: metrics.totals.grace },
           { status: 'EXPIRED', count: metrics.totals.expired },
           { status: 'SUSPENDED', count: metrics.totals.suspended },
-          { status: 'UNDER_REVIEW', count: metrics.totals.underReview },
         ],
+        underReview: metrics.totals.underReview,
         users: {
           active: activeUsers,
           inactive: inactiveUsers,
@@ -913,6 +1167,8 @@ export class PlatformService {
             readOnlyEnabled: true,
             readOnlyReason: true,
             rateLimitOverride: true,
+            onboarding: true,
+            onboardingCompletedAt: true,
           },
         },
         _count: {
@@ -927,6 +1183,28 @@ export class PlatformService {
 
     if (!business) {
       throw new BadRequestException('Business not found.');
+    }
+
+    // Fetch system owner via System Owner role
+    const systemOwnerRole = await this.prisma.role.findFirst({
+      where: { businessId, name: 'System Owner', isSystem: true },
+      select: { id: true },
+    });
+    let systemOwner: { name: string; email: string; phone: string | null } | null = null;
+    if (systemOwnerRole) {
+      const userRole = await this.prisma.userRole.findFirst({
+        where: { roleId: systemOwnerRole.id },
+        select: { userId: true },
+      });
+      if (userRole) {
+        const owner = await this.prisma.user.findUnique({
+          where: { id: userRole.userId },
+          select: { name: true, email: true, phone: true },
+        });
+        if (owner) {
+          systemOwner = { name: owner.name, email: owner.email, phone: owner.phone };
+        }
+      }
     }
 
     const [health, pendingSupport, pendingExports, pendingSubscriptionRequests, devices, auditActions] =
@@ -971,6 +1249,7 @@ export class PlatformService {
         id: business.id,
         name: business.name,
         status: business.status,
+        defaultLanguage: business.defaultLanguage,
         underReview: business.underReview,
         reviewReason: business.reviewReason,
         reviewSeverity: business.reviewSeverity,
@@ -980,6 +1259,7 @@ export class PlatformService {
       },
       subscription: business.subscription,
       settings: business.settings,
+      systemOwner,
       counts: {
         branches: business._count.branches,
         users: business._count.businessUsers,
@@ -1006,9 +1286,27 @@ export class PlatformService {
       correlationId?: string;
       requestId?: string;
       sessionId?: string;
+      from?: string;
+      to?: string;
     } = {},
   ) {
     const pagination = parsePagination(query, 80, 200);
+    const fromDate = query.from ? new Date(query.from) : null;
+    const toDate = query.to ? new Date(query.to) : null;
+    const createdAtFilter =
+      (fromDate && !Number.isNaN(fromDate.getTime())) ||
+      (toDate && !Number.isNaN(toDate.getTime()))
+        ? {
+            createdAt: {
+              ...(fromDate && !Number.isNaN(fromDate.getTime())
+                ? { gte: fromDate }
+                : {}),
+              ...(toDate && !Number.isNaN(toDate.getTime())
+                ? { lte: toDate }
+                : {}),
+            },
+          }
+        : {};
     const logs = await this.prisma.auditLog.findMany({
       where: {
         ...(query.businessId ? { businessId: query.businessId } : {}),
@@ -1018,6 +1316,7 @@ export class PlatformService {
         ...(query.correlationId ? { correlationId: query.correlationId } : {}),
         ...(query.requestId ? { requestId: query.requestId } : {}),
         ...(query.sessionId ? { sessionId: query.sessionId } : {}),
+        ...createdAtFilter,
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       ...pagination,
@@ -1288,7 +1587,13 @@ export class PlatformService {
             .then((rows) => rows.map((row) => row.userId));
           if (userIds.length) {
             await tx.refreshToken.updateMany({
-              where: { userId: { in: userIds }, revokedAt: null },
+              where: {
+                revokedAt: null,
+                OR: [
+                  { businessId },
+                  { userId: { in: userIds }, businessId: null },
+                ],
+              },
               data: { revokedAt: new Date() },
             });
             revokedCount = userIds.length;
@@ -1656,9 +1961,16 @@ export class PlatformService {
       await tx.priceList.deleteMany({ where: { businessId } });
       await tx.business.delete({ where: { id: businessId } });
 
+      // Revoke refresh tokens scoped to this business + legacy tokens without businessId
       if (userIdList.length) {
         await tx.refreshToken.updateMany({
-          where: { userId: { in: userIdList }, revokedAt: null },
+          where: {
+            revokedAt: null,
+            OR: [
+              { businessId },
+              { userId: { in: userIdList }, businessId: null },
+            ],
+          },
           data: { revokedAt: new Date() },
         });
       }
@@ -2417,43 +2729,109 @@ export class PlatformService {
     requestId: string;
     platformAdminId: string;
     responseNote?: string;
+    durationMonths?: number;
+    isPaid?: boolean;
+    amountDue?: number;
   }) {
-    const request = await this.prisma.subscriptionRequest.findFirst({
-      where: { id: data.requestId },
-    });
-    if (!request) {
-      throw new BadRequestException('Subscription request not found.');
-    }
-    if (request.status !== SubscriptionRequestStatus.PENDING) {
-      throw new BadRequestException('Subscription request already resolved.');
-    }
-
-    const reason = data.responseNote ?? 'Subscription request approved.';
-    if (request.type === SubscriptionRequestType.CANCEL) {
-      await this.updateSubscription(request.businessId, {
-        platformAdminId: data.platformAdminId,
-        status: SubscriptionStatus.EXPIRED,
-        expiresAt: new Date(),
-        reason,
-      });
-    } else {
-      await this.updateSubscription(request.businessId, {
-        platformAdminId: data.platformAdminId,
-        tier: request.requestedTier ?? SubscriptionTier.BUSINESS,
-        status: SubscriptionStatus.ACTIVE,
-        reason,
-      });
-    }
-
-    const updated = await this.prisma.subscriptionRequest.update({
-      where: { id: request.id },
+    // ── Atomic claim: PENDING → APPROVED in one statement ─────────────────
+    // Two concurrent approve calls can no longer both pass the status check
+    // because Postgres serializes the updateMany — only one gets count: 1.
+    // The loser sees the row as already APPROVED and bails out.
+    const decidedAt = new Date();
+    const claim = await this.prisma.subscriptionRequest.updateMany({
+      where: {
+        id: data.requestId,
+        status: SubscriptionRequestStatus.PENDING,
+      },
       data: {
         status: SubscriptionRequestStatus.APPROVED,
-        decidedAt: new Date(),
+        decidedAt,
         decidedByPlatformAdminId: data.platformAdminId,
-        responseNote: data.responseNote ?? null,
       },
     });
+    if (claim.count === 0) {
+      const exists = await this.prisma.subscriptionRequest.findUnique({
+        where: { id: data.requestId },
+        select: { id: true },
+      });
+      throw new BadRequestException(
+        exists
+          ? 'Subscription request already resolved.'
+          : 'Subscription request not found.',
+      );
+    }
+
+    // We won the claim — load the now-claimed row.
+    const request = await this.prisma.subscriptionRequest.findUniqueOrThrow({
+      where: { id: data.requestId },
+    });
+
+    const reason = data.responseNote ?? 'Subscription request approved.';
+    const effectiveTier = request.requestedTier ?? SubscriptionTier.BUSINESS;
+    const approvedDuration =
+      request.type !== SubscriptionRequestType.CANCEL
+        ? (data.durationMonths ?? request.requestedDurationMonths ?? 1)
+        : null;
+
+    let updated;
+    try {
+      // Heavy work — runs only after we've claimed the request.
+      if (request.type === SubscriptionRequestType.CANCEL) {
+        await this.updateSubscription(request.businessId, {
+          platformAdminId: data.platformAdminId,
+          status: SubscriptionStatus.EXPIRED,
+          expiresAt: new Date(),
+          reason,
+        });
+      } else {
+        // For UPGRADE/SUBSCRIBE: use recordSubscriptionPurchase for proper duration handling
+        await this.recordSubscriptionPurchase({
+          businessId: request.businessId,
+          platformAdminId: data.platformAdminId,
+          tier: effectiveTier as SubscriptionTier,
+          months: approvedDuration ?? 1,
+          isPaid: data.isPaid,
+          amountDue: data.amountDue,
+          reason,
+        });
+      }
+
+      // Finalize the claimed row with the decision payload.
+      updated = await this.prisma.subscriptionRequest.update({
+        where: { id: request.id },
+        data: {
+          responseNote: data.responseNote ?? null,
+          approvedDurationMonths: approvedDuration,
+          approvedTier:
+            request.type !== SubscriptionRequestType.CANCEL
+              ? String(effectiveTier)
+              : null,
+          isPaid: data.isPaid ?? null,
+          amountDue: data.amountDue ?? null,
+        },
+      });
+    } catch (err) {
+      // Heavy work failed — roll the claim back to PENDING so the request
+      // can be retried. Best-effort: if rollback also fails the request is
+      // left APPROVED with no purchase recorded, which requires manual fix.
+      try {
+        await this.prisma.subscriptionRequest.update({
+          where: { id: request.id },
+          data: {
+            status: SubscriptionRequestStatus.PENDING,
+            decidedAt: null,
+            decidedByPlatformAdminId: null,
+          },
+        });
+      } catch (rollbackErr) {
+        this.logger.error(
+          `Failed to roll back subscription request claim ${request.id}: ${
+            rollbackErr instanceof Error ? rollbackErr.message : rollbackErr
+          }`,
+        );
+      }
+      throw err;
+    }
 
     await this.auditService.logEvent({
       businessId: request.businessId,
@@ -2466,6 +2844,10 @@ export class PlatformService {
       metadata: {
         type: request.type,
         requestedTier: request.requestedTier ?? null,
+        approvedDurationMonths: approvedDuration,
+        approvedTier: String(effectiveTier),
+        isPaid: data.isPaid ?? null,
+        amountDue: data.amountDue ?? null,
       },
     });
     await this.logPlatformAction({
@@ -2497,18 +2879,15 @@ export class PlatformService {
     platformAdminId: string;
     responseNote?: string;
   }) {
-    const request = await this.prisma.subscriptionRequest.findFirst({
-      where: { id: data.requestId },
-    });
-    if (!request) {
-      throw new BadRequestException('Subscription request not found.');
-    }
-    if (request.status !== SubscriptionRequestStatus.PENDING) {
-      throw new BadRequestException('Subscription request already resolved.');
-    }
-    const reason = data.responseNote ?? 'Subscription request rejected.';
-    const updated = await this.prisma.subscriptionRequest.update({
-      where: { id: request.id },
+    // ── Atomic claim: PENDING → REJECTED in one statement ─────────────────
+    // Reject is simpler than approve — no heavy follow-on work, so we can
+    // do the full transition in a single updateMany. Two concurrent reject
+    // calls can no longer both succeed.
+    const claim = await this.prisma.subscriptionRequest.updateMany({
+      where: {
+        id: data.requestId,
+        status: SubscriptionRequestStatus.PENDING,
+      },
       data: {
         status: SubscriptionRequestStatus.REJECTED,
         decidedAt: new Date(),
@@ -2516,6 +2895,23 @@ export class PlatformService {
         responseNote: data.responseNote ?? null,
       },
     });
+    if (claim.count === 0) {
+      const exists = await this.prisma.subscriptionRequest.findUnique({
+        where: { id: data.requestId },
+        select: { id: true },
+      });
+      throw new BadRequestException(
+        exists
+          ? 'Subscription request already resolved.'
+          : 'Subscription request not found.',
+      );
+    }
+
+    const request = await this.prisma.subscriptionRequest.findUniqueOrThrow({
+      where: { id: data.requestId },
+    });
+    const reason = data.responseNote ?? 'Subscription request rejected.';
+    const updated = request;
 
     await this.auditService.logEvent({
       businessId: request.businessId,
@@ -2562,6 +2958,17 @@ export class PlatformService {
     });
     if (!existing) {
       throw new BadRequestException('Export job not found.');
+    }
+    // Bug fix: only COMPLETED jobs can be marked delivered. Marking a
+    // PENDING/RUNNING/FAILED/CANCELED job as delivered makes no sense and
+    // was previously allowed.
+    if (existing.status !== ExportJobStatus.COMPLETED) {
+      throw new BadRequestException(
+        'Only COMPLETED export jobs can be marked as delivered.',
+      );
+    }
+    if (existing.deliveredAt) {
+      throw new BadRequestException('Export job is already marked delivered.');
     }
     const deliveredAt = data.deliveredAt ?? new Date();
     const updated = await this.prisma.exportJob.update({
@@ -3003,9 +3410,16 @@ export class PlatformService {
     });
     const userIds = users.map((entry) => entry.userId);
     const revokedAt = new Date();
+    // Revoke tokens scoped to this business + legacy tokens without businessId
     const result = userIds.length
       ? await this.prisma.refreshToken.updateMany({
-          where: { userId: { in: userIds }, revokedAt: null },
+          where: {
+            revokedAt: null,
+            OR: [
+              { businessId: data.businessId },
+              { userId: { in: userIds }, businessId: null },
+            ],
+          },
           data: { revokedAt },
         })
       : { count: 0 };
@@ -3298,10 +3712,10 @@ export class PlatformService {
       throw new BadRequestException('Invalid severity. Must be INFO, WARNING, or SECURITY.');
     }
     const startsAt = data.startsAt ?? new Date();
-    const endsAt =
-      data.endsAt === undefined
-        ? new Date(startsAt.getTime() + 24 * 60 * 60 * 1000)
-        : data.endsAt;
+    // Bug fix: previously had a "+24h default" that was unreachable due to a
+    // controller `null` mapping. Now `endsAt` is explicit: null means
+    // open-ended. Frontend's "Auto-end after" duration UI handles defaults.
+    const endsAt = data.endsAt ?? null;
     if (endsAt !== null && endsAt <= startsAt) {
       throw new BadRequestException('End date must be after start date.');
     }
@@ -3310,8 +3724,9 @@ export class PlatformService {
         title: data.title,
         message: data.message,
         severity: data.severity,
+        reason: data.reason ?? null,
         startsAt,
-        endsAt: endsAt ?? null,
+        endsAt,
         createdByPlatformAdminId: data.platformAdminId,
         businessTargets: businessTargets.length
           ? {
@@ -3500,15 +3915,211 @@ export class PlatformService {
     };
   }
 
-  async listAnnouncements() {
-    return this.prisma.platformAnnouncement.findMany({
-      include: {
-        businessTargets: true,
-        segmentTargets: true,
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
+  async listAnnouncements(
+    query: PaginationQuery & {
+      status?: 'active' | 'upcoming' | 'ended';
+      severity?: string;
+    } = {},
+  ) {
+    const pagination = parsePagination(query, 20, 100);
+    const now = new Date();
+    let where: Prisma.PlatformAnnouncementWhereInput = {};
+    if (query.status === 'active') {
+      where = {
+        startsAt: { lte: now },
+        OR: [{ endsAt: null }, { endsAt: { gte: now } }],
+      };
+    } else if (query.status === 'upcoming') {
+      where = { startsAt: { gt: now } };
+    } else if (query.status === 'ended') {
+      where = { endsAt: { not: null, lt: now } };
+    }
+    if (query.severity) {
+      where = { ...where, severity: query.severity };
+    }
+    return this.prisma.platformAnnouncement
+      .findMany({
+        where,
+        include: {
+          businessTargets: true,
+          segmentTargets: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        ...pagination,
+      })
+      .then((items) => buildPaginatedResponse(items, pagination.take));
+  }
+
+  async updateAnnouncement(data: {
+    announcementId: string;
+    platformAdminId: string;
+    title?: string;
+    message?: string;
+    severity?: string;
+    reason?: string | null;
+    startsAt?: Date | null;
+    endsAt?: Date | null;
+    targetBusinessIds?: string[];
+    targetTiers?: string[];
+    targetStatuses?: string[];
+  }) {
+    const existing = await this.prisma.platformAnnouncement.findUnique({
+      where: { id: data.announcementId },
     });
+    if (!existing) {
+      throw new NotFoundException('Announcement not found.');
+    }
+    // Only ACTIVE or UPCOMING announcements can be edited.
+    const now = new Date();
+    if (existing.endsAt !== null && existing.endsAt < now) {
+      throw new BadRequestException(
+        'Ended announcements cannot be edited. Use Duplicate to recreate.',
+      );
+    }
+    if (data.severity !== undefined) {
+      const VALID_SEVERITIES = new Set(['INFO', 'WARNING', 'SECURITY']);
+      if (!VALID_SEVERITIES.has(data.severity)) {
+        throw new BadRequestException(
+          'Invalid severity. Must be INFO, WARNING, or SECURITY.',
+        );
+      }
+    }
+    const nextStartsAt = data.startsAt ?? existing.startsAt;
+    const nextEndsAt = data.endsAt === undefined ? existing.endsAt : data.endsAt;
+    if (nextEndsAt !== null && nextEndsAt <= nextStartsAt) {
+      throw new BadRequestException('End date must be after start date.');
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // Replace targets if any of the target arrays were provided.
+      const replaceTargets =
+        data.targetBusinessIds !== undefined ||
+        data.targetTiers !== undefined ||
+        data.targetStatuses !== undefined;
+
+      if (replaceTargets) {
+        await tx.platformAnnouncementBusinessTarget.deleteMany({
+          where: { announcementId: existing.id },
+        });
+        await tx.platformAnnouncementSegmentTarget.deleteMany({
+          where: { announcementId: existing.id },
+        });
+
+        const businessTargets = Array.from(
+          new Set((data.targetBusinessIds ?? []).filter(Boolean)),
+        );
+        const tierTargets = Array.from(
+          new Set((data.targetTiers ?? []).filter(Boolean)),
+        );
+        const statusTargets = Array.from(
+          new Set((data.targetStatuses ?? []).filter(Boolean)),
+        );
+
+        if (businessTargets.length) {
+          await tx.platformAnnouncementBusinessTarget.createMany({
+            data: businessTargets.map((businessId) => ({
+              announcementId: existing.id,
+              businessId,
+            })),
+            skipDuplicates: true,
+          });
+        }
+        if (tierTargets.length || statusTargets.length) {
+          await tx.platformAnnouncementSegmentTarget.createMany({
+            data: [
+              ...tierTargets.map((value) => ({
+                announcementId: existing.id,
+                type: PlatformAnnouncementSegmentType.TIER,
+                value,
+              })),
+              ...statusTargets.map((value) => ({
+                announcementId: existing.id,
+                type: PlatformAnnouncementSegmentType.STATUS,
+                value,
+              })),
+            ],
+            skipDuplicates: true,
+          });
+        }
+      }
+
+      return tx.platformAnnouncement.update({
+        where: { id: existing.id },
+        data: {
+          title: data.title,
+          message: data.message,
+          severity: data.severity,
+          reason: data.reason,
+          // startsAt is non-nullable; only set if a Date was provided
+          startsAt: data.startsAt ?? undefined,
+          endsAt: data.endsAt,
+        },
+        include: {
+          businessTargets: true,
+          segmentTargets: true,
+        },
+      });
+    });
+
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'PLATFORM_ANNOUNCEMENT_UPDATE',
+      resourceType: 'PlatformAnnouncement',
+      resourceId: updated.id,
+      reason: data.reason ?? undefined,
+      metadata: {
+        title: data.title,
+        severity: data.severity,
+        startsAt: nextStartsAt,
+        endsAt: nextEndsAt,
+      },
+    });
+    this.notificationStream.emitAnnouncementChanged({
+      id: updated.id,
+      action: 'updated',
+    });
+    return updated;
+  }
+
+  async deleteAnnouncement(data: {
+    announcementId: string;
+    platformAdminId: string;
+  }) {
+    const existing = await this.prisma.platformAnnouncement.findUnique({
+      where: { id: data.announcementId },
+    });
+    if (!existing) {
+      throw new NotFoundException('Announcement not found.');
+    }
+    const now = new Date();
+    // Only ENDED announcements can be deleted.
+    if (existing.endsAt === null || existing.endsAt >= now) {
+      throw new BadRequestException(
+        'Only ended announcements can be deleted. End the announcement first.',
+      );
+    }
+    await this.prisma.$transaction(async (tx) => {
+      await tx.platformAnnouncementBusinessTarget.deleteMany({
+        where: { announcementId: existing.id },
+      });
+      await tx.platformAnnouncementSegmentTarget.deleteMany({
+        where: { announcementId: existing.id },
+      });
+      await tx.platformAnnouncement.delete({
+        where: { id: existing.id },
+      });
+    });
+    await this.logPlatformAction({
+      platformAdminId: data.platformAdminId,
+      action: 'PLATFORM_ANNOUNCEMENT_DELETE',
+      resourceType: 'PlatformAnnouncement',
+      resourceId: existing.id,
+      metadata: {
+        title: existing.title,
+        severity: existing.severity,
+      },
+    });
+    return { deleted: true, id: existing.id };
   }
 
   async endAnnouncement(data: {
@@ -3655,10 +4266,16 @@ export class PlatformService {
       },
     );
 
+    // ── Perf: aggregate offline + export time-series at the DB level ──
+    // Previously we findMany'd every row and bucketed in JS. At scale this
+    // would load millions of rows into memory. Now we use date_trunc so the
+    // database returns pre-bucketed counts. apiMetric still uses findMany
+    // because percentile calculations need row-level durations.
+    const truncUnit = bucketHours >= 24 ? 'day' : 'hour';
     const [
       metricsRows,
-      offlineRows,
-      exportRows,
+      offlineBuckets,
+      exportBuckets,
       businessesTotal,
       activeCount,
       graceCount,
@@ -3675,14 +4292,24 @@ export class PlatformService {
           path: true,
         },
       }),
-      this.prisma.offlineAction.findMany({
-        where: { createdAt: { gte: start, lte: now }, status: 'FAILED' },
-        select: { createdAt: true },
-      }),
-      this.prisma.exportJob.findMany({
-        where: { createdAt: { gte: start, lte: now }, status: 'PENDING' },
-        select: { createdAt: true },
-      }),
+      this.prisma.$queryRaw<{ bucket: Date; count: bigint }[]>`
+        SELECT date_trunc(${truncUnit}::text, "createdAt") AS bucket,
+               COUNT(*)::bigint AS count
+        FROM "OfflineAction"
+        WHERE "createdAt" >= ${start} AND "createdAt" <= ${now}
+          AND "status" = 'FAILED'
+        GROUP BY bucket
+        ORDER BY bucket ASC
+      `,
+      this.prisma.$queryRaw<{ bucket: Date; count: bigint }[]>`
+        SELECT date_trunc(${truncUnit}::text, "createdAt") AS bucket,
+               COUNT(*)::bigint AS count
+        FROM "ExportJob"
+        WHERE "createdAt" >= ${start} AND "createdAt" <= ${now}
+          AND "status" = 'PENDING'
+        GROUP BY bucket
+        ORDER BY bucket ASC
+      `,
       this.prisma.business.count(),
       this.prisma.business.count({ where: { status: 'ACTIVE' } }),
       this.prisma.business.count({ where: { status: 'GRACE' } }),
@@ -3710,13 +4337,14 @@ export class PlatformService {
       }
     });
 
-    offlineRows.forEach((row) => {
-      const idx = bucketIndex(row.createdAt);
-      buckets[idx].offlineFailed += 1;
+    // Map DB-aggregated offline + export buckets into the per-bucket array.
+    offlineBuckets.forEach((row) => {
+      const idx = bucketIndex(new Date(row.bucket));
+      buckets[idx].offlineFailed += Number(row.count);
     });
-    exportRows.forEach((row) => {
-      const idx = bucketIndex(row.createdAt);
-      buckets[idx].exportsPending += 1;
+    exportBuckets.forEach((row) => {
+      const idx = bucketIndex(new Date(row.bucket));
+      buckets[idx].exportsPending += Number(row.count);
     });
 
     buckets.forEach((bucket, idx) => {
@@ -3797,9 +4425,16 @@ export class PlatformService {
         underReview: reviewCount,
         offlineEnabled,
       },
-      offlineFailures: offlineRows.length,
+      // Totals summed from the DB-aggregated buckets.
+      offlineFailures: offlineBuckets.reduce(
+        (sum, row) => sum + Number(row.count),
+        0,
+      ),
       exports: {
-        pending: exportRows.length,
+        pending: exportBuckets.reduce(
+          (sum, row) => sum + Number(row.count),
+          0,
+        ),
       },
       api: {
         totalRequests: metricsRows.length,
@@ -3948,6 +4583,10 @@ export class PlatformService {
       byTier: mrrByTier,
       monthly,
       totalSubscribers: activeSubscriptions.length,
+      // Bug fix: frontend previously read `totalPaidSubscribers` (didn't exist) —
+      // expose both `totalSubscribers` and `paidSubscribers` so the stat cards
+      // can show total active vs paid specifically.
+      paidSubscribers: paidCount,
       paidCount,
       complimentaryCount,
       totalCollected,
@@ -4020,10 +4659,42 @@ export class PlatformService {
         ? (archivedOrDeleted.length / (totalActive + archivedOrDeleted.length)) * 100
         : 0;
 
+    // ── Monthly churn trend (last 12 months) ───────────────────────────────
+    // Count churned businesses per month — used to render the churn trend
+    // chart with color threshold zones (green < 2%, amber 2-5%, red > 5%).
+    const now = new Date();
+    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+    const churnedLast12Months = await this.prisma.business.findMany({
+      where: {
+        status: { in: [BusinessStatus.ARCHIVED, BusinessStatus.DELETED] },
+        updatedAt: { gte: twelveMonthsAgo },
+      },
+      select: { updatedAt: true },
+    });
+    const churnCountByMonth = new Map<string, number>();
+    for (const b of churnedLast12Months) {
+      const key = b.updatedAt.toISOString().slice(0, 7);
+      churnCountByMonth.set(key, (churnCountByMonth.get(key) ?? 0) + 1);
+    }
+    const monthlyChurn: { month: string; count: number; rate: number }[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = d.toISOString().slice(0, 7);
+      const count = churnCountByMonth.get(key) ?? 0;
+      const denom = totalActive + count;
+      const rate = denom > 0 ? (count / denom) * 100 : 0;
+      monthlyChurn.push({
+        month: key,
+        count,
+        rate: Math.round(rate * 100) / 100,
+      });
+    }
+
     return {
       range: `${days}d`,
       churnRate: Math.round(churnRate * 100) / 100,
       churnedCount: archivedOrDeleted.length,
+      monthlyChurn,
       recentlyChurned: archivedOrDeleted.slice(0, 20).map((b) => ({
         businessId: b.id,
         name: b.name,
@@ -4082,19 +4753,74 @@ export class PlatformService {
     }
 
     const now = new Date();
-    const monthlyConversions: { month: string; conversions: number }[] = [];
-    for (let i = 5; i >= 0; i--) {
+    // ── Monthly funnel: trials started + conversions per month (last 12) ──
+    // Used to render the conversion funnel visualization and monthly bar chart.
+    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+    const trialStartsLast12 = await this.prisma.subscriptionHistory.findMany({
+      where: {
+        newStatus: SubscriptionStatus.TRIAL,
+        createdAt: { gte: twelveMonthsAgo },
+      },
+      select: { createdAt: true },
+    });
+    const trialStartCountByMonth = new Map<string, number>();
+    for (const row of trialStartsLast12) {
+      const key = row.createdAt.toISOString().slice(0, 7);
+      trialStartCountByMonth.set(
+        key,
+        (trialStartCountByMonth.get(key) ?? 0) + 1,
+      );
+    }
+
+    const monthlyConversions: {
+      month: string;
+      conversions: number;
+      trialsStarted: number;
+    }[] = [];
+    for (let i = 11; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const key = d.toISOString().slice(0, 7);
-      const count = conversions.filter((c) => c.createdAt.toISOString().startsWith(key)).length;
-      monthlyConversions.push({ month: key, conversions: count });
+      const count = conversions.filter((c) =>
+        c.createdAt.toISOString().startsWith(key),
+      ).length;
+      monthlyConversions.push({
+        month: key,
+        conversions: count,
+        trialsStarted: trialStartCountByMonth.get(key) ?? 0,
+      });
     }
+
+    // ── Trial duration distribution for histogram ──
+    const trialDurations: number[] = [];
+    for (const conv of conversions) {
+      const start = trialStartMap.get(conv.businessId);
+      if (start) {
+        const days =
+          (conv.createdAt.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
+        trialDurations.push(Math.round(days));
+      }
+    }
+    const sortedDurations = [...trialDurations].sort((a, b) => a - b);
+    const medianTrialDays =
+      sortedDurations.length > 0
+        ? sortedDurations[Math.floor(sortedDurations.length / 2)]
+        : null;
+
+    // ── Funnel stages ──
+    const funnel = {
+      trialStarted: trialBusinesses.length,
+      converted: convertedIds.size,
+      dropOff: Math.max(0, trialBusinesses.length - convertedIds.size),
+    };
 
     return {
       conversionRate: Math.round(conversionRate * 100) / 100,
       totalConversions: convertedIds.size,
       totalTrialBusinesses: trialBusinesses.length,
       avgTrialDays: trialDaysCount > 0 ? Math.round(totalTrialDays / trialDaysCount) : null,
+      medianTrialDays,
+      trialDurationDistribution: trialDurations,
+      funnel,
       monthlyConversions,
       generatedAt: new Date().toISOString(),
     };
@@ -4166,6 +4892,23 @@ export class PlatformService {
         complimentaryCount: totals._count.id - paidTotals._count.id,
       },
     };
+  }
+
+  // ─── ORPHAN DETECTION ────────────────────────────────────────────────────────
+
+  /**
+   * Returns businesses that have no BusinessUser records and are not archived/deleted.
+   * These are likely orphans from failed signup flows (before the atomic fix).
+   */
+  async findOrphanBusinesses() {
+    return this.prisma.business.findMany({
+      where: {
+        businessUsers: { none: {} },
+        status: { notIn: ['ARCHIVED', 'DELETED'] },
+      },
+      select: { id: true, name: true, createdAt: true, status: true },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   // ─── GLOBAL SEARCH ──────────────────────────────────────────────────────────
@@ -4422,38 +5165,74 @@ export class PlatformService {
       try {
         if (action.actionType === 'STATUS_CHANGE') {
           const p = action.payload as { status?: string; reason?: string };
-          if (p.status) {
-            await this.prisma.$transaction([
-              this.prisma.business.update({
-                where: { id: action.businessId },
-                data: { status: p.status as any },
-              }),
-              this.prisma.platformScheduledAction.update({
-                where: { id: action.id },
-                data: { executedAt: new Date() },
-              }),
-            ]);
+          if (!p.status) {
+            this.logger.warn(
+              `Scheduled action ${action.id} (STATUS_CHANGE) skipped: missing status in payload`,
+            );
+            continue;
           }
+          // Use the proper updateBusinessStatus method which validates the
+          // state machine, runs in a transaction, revokes tokens if needed,
+          // and creates audit + platform action log entries.
+          await this.updateBusinessStatus(
+            action.businessId,
+            p.status as BusinessStatus,
+            action.platformAdminId,
+            p.reason ?? `Scheduled action: ${action.id}`,
+            null,
+            `scheduled-action:${action.id}`,
+          );
+          await this.prisma.platformScheduledAction.update({
+            where: { id: action.id },
+            data: { executedAt: new Date() },
+          });
         } else if (action.actionType === 'SUBSCRIPTION_CHANGE') {
           const p = action.payload as { tier?: string; status?: string; reason?: string };
-          if (p.tier || p.status) {
-            await this.prisma.$transaction([
-              this.prisma.subscription.updateMany({
-                where: { businessId: action.businessId },
-                data: {
-                  ...(p.tier ? { tier: p.tier as any } : {}),
-                  ...(p.status ? { status: p.status as any } : {}),
-                },
-              }),
-              this.prisma.platformScheduledAction.update({
-                where: { id: action.id },
-                data: { executedAt: new Date() },
-              }),
-            ]);
+          if (!p.tier && !p.status) {
+            this.logger.warn(
+              `Scheduled action ${action.id} (SUBSCRIPTION_CHANGE) skipped: missing tier and status in payload`,
+            );
+            continue;
           }
+          // Use the proper updateSubscription method which audits and validates.
+          await this.updateSubscription(action.businessId, {
+            platformAdminId: action.platformAdminId,
+            tier: p.tier as SubscriptionTier | undefined,
+            status: p.status as SubscriptionStatus | undefined,
+            reason: p.reason ?? `Scheduled action: ${action.id}`,
+            idempotencyKey: `scheduled-action:${action.id}`,
+          });
+          await this.prisma.platformScheduledAction.update({
+            where: { id: action.id },
+            data: { executedAt: new Date() },
+          });
+        } else {
+          this.logger.warn(
+            `Scheduled action ${action.id} skipped: unsupported actionType "${action.actionType}"`,
+          );
         }
-      } catch {
-        // Log and continue — one failure shouldn't block others
+      } catch (err) {
+        // Log the failure with context but continue processing other actions.
+        // Mark the action as failed by recording the error in a separate audit log.
+        this.logger.error(
+          `Scheduled action ${action.id} (${action.actionType}, business ${action.businessId}) failed: ${err instanceof Error ? err.message : String(err)}`,
+          err instanceof Error ? err.stack : undefined,
+        );
+        try {
+          await this.auditService.logEvent({
+            businessId: action.businessId,
+            userId: action.platformAdminId,
+            action: 'PLATFORM_SCHEDULED_ACTION_FAILED',
+            outcome: 'FAILURE',
+            resourceType: 'PlatformScheduledAction',
+            resourceId: action.id,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        } catch (auditErr) {
+          this.logger.error(
+            `Failed to audit-log scheduled action failure ${action.id}: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
+          );
+        }
       }
     }
   }

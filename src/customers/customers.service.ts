@@ -89,14 +89,37 @@ export class CustomersService {
       orderBy: { createdAt: 'desc' },
       ...pagination,
     });
-    const items = canViewSensitive
-      ? customers
-      : customers.map((customer) => ({
-          ...customer,
-          phone: this.maskValue(customer.phone),
-          email: customer.email ? this.maskValue(customer.email) : null,
-          tin: this.maskValue(customer.tin),
-        }));
+    // Enrich with outstanding balance from sales
+    const customerIds = customers.map((c) => c.id);
+    const outstandingData = customerIds.length
+      ? await this.prisma.sale.groupBy({
+          by: ['customerId'],
+          where: {
+            businessId,
+            customerId: { in: customerIds },
+            outstandingAmount: { gt: 0 },
+          },
+          _sum: { outstandingAmount: true },
+        })
+      : [];
+    const outstandingMap = new Map(
+      outstandingData.map((o) => [
+        o.customerId,
+        Number(o._sum.outstandingAmount ?? 0),
+      ]),
+    );
+
+    const items = customers.map((customer) => ({
+      ...(canViewSensitive
+        ? customer
+        : {
+            ...customer,
+            phone: this.maskValue(customer.phone),
+            email: customer.email ? this.maskValue(customer.email) : null,
+            tin: this.maskValue(customer.tin),
+          }),
+      totalOutstanding: outstandingMap.get(customer.id) ?? 0,
+    }));
     return buildPaginatedResponse(items, pagination.take);
   }
 
@@ -252,6 +275,34 @@ export class CustomersService {
       after: updated as unknown as Record<string, unknown>,
     });
     return updated;
+  }
+
+  async getCustomerTimeline(businessId: string, customerId: string) {
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: customerId, businessId },
+      select: { id: true },
+    });
+    if (!customer) {
+      return null;
+    }
+    const [sales, refunds] = await Promise.all([
+      this.prisma.sale.findMany({
+        where: { businessId, customerId, status: 'COMPLETED' },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+        select: { id: true, referenceNumber: true, total: true, createdAt: true },
+      }),
+      this.prisma.saleRefund.findMany({
+        where: { businessId, customerId, status: 'COMPLETED' },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: { id: true, total: true, createdAt: true },
+      }),
+    ]);
+    return {
+      sales: sales.map((s) => ({ ...s, type: 'sale' as const })),
+      refunds: refunds.map((r) => ({ ...r, type: 'refund' as const })),
+    };
   }
 
   async exportCsv(businessId: string, canViewSensitive: boolean) {

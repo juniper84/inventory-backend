@@ -34,7 +34,21 @@ export class PriceListsService {
       orderBy: { createdAt: 'desc' },
       ...pagination,
     });
-    return buildPaginatedResponse(items, pagination.take);
+
+    const customerCounts = await this.prisma.customer.groupBy({
+      by: ['priceListId'],
+      where: { businessId, priceListId: { not: null } },
+      _count: { id: true },
+    });
+    const countMap = new Map(
+      customerCounts.map((c) => [c.priceListId, c._count.id]),
+    );
+    const enriched = items.map((item) => ({
+      ...item,
+      customerCount: countMap.get(item.id) ?? 0,
+    }));
+
+    return buildPaginatedResponse(enriched, pagination.take);
   }
 
   async create(businessId: string, userId: string, data: { name: string }) {
@@ -116,6 +130,19 @@ export class PriceListsService {
       return null;
     }
 
+    // Capture existing price for undo snapshot
+    const existing = await this.prisma.priceListItem.findUnique({
+      where: {
+        priceListId_variantId: {
+          priceListId: listId,
+          variantId: data.variantId,
+        },
+      },
+    });
+    const oldPrice = existing
+      ? Number(existing.price)
+      : Number(variant.defaultPrice ?? 0);
+
     const item = await this.prisma.priceListItem.upsert({
       where: {
         priceListId_variantId: {
@@ -130,6 +157,19 @@ export class PriceListsService {
         price: new Prisma.Decimal(data.price),
       },
     });
+
+    // Save snapshot for undo
+    await this.prisma.priceSnapshot.create({
+      data: {
+        businessId,
+        priceListId: listId,
+        variantId: data.variantId,
+        oldPrice: new Prisma.Decimal(oldPrice),
+        newPrice: new Prisma.Decimal(data.price),
+        changedById: userId,
+      },
+    });
+
     await this.auditService.logEvent({
       businessId,
       userId,
@@ -140,6 +180,64 @@ export class PriceListsService {
       metadata: { priceListId: listId, variantId: data.variantId },
     });
     return item;
+  }
+
+  async undoLastPriceChange(
+    businessId: string,
+    priceListId: string,
+    userId: string,
+  ) {
+    const list = await this.prisma.priceList.findFirst({
+      where: { id: priceListId, businessId },
+    });
+    if (!list) {
+      return null;
+    }
+
+    // Find the most recent snapshot for this price list
+    const latest = await this.prisma.priceSnapshot.findFirst({
+      where: { businessId, priceListId },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!latest) {
+      return { reverted: 0 };
+    }
+
+    // Get all snapshots from the same batch (within 5 seconds of the latest)
+    const batchStart = new Date(latest.createdAt.getTime() - 5000);
+    const snapshots = await this.prisma.priceSnapshot.findMany({
+      where: {
+        businessId,
+        priceListId,
+        createdAt: { gte: batchStart },
+      },
+    });
+
+    // Revert each price inside a transaction
+    await this.prisma.$transaction(async (tx) => {
+      for (const snap of snapshots) {
+        await tx.priceListItem.updateMany({
+          where: { priceListId, variantId: snap.variantId },
+          data: { price: snap.oldPrice },
+        });
+      }
+      // Delete the used snapshots
+      await tx.priceSnapshot.deleteMany({
+        where: { id: { in: snapshots.map((s) => s.id) } },
+      });
+    });
+
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      action: 'PRICE_LIST_UNDO',
+      resourceType: 'PriceList',
+      resourceId: priceListId,
+      outcome: 'SUCCESS',
+      metadata: { revertedCount: snapshots.length },
+    });
+
+    return { reverted: snapshots.length };
   }
 
   async removeItem(

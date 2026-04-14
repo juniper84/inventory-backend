@@ -63,6 +63,7 @@ export class ExportsController {
         | 'EXPORT_ON_EXIT';
       acknowledgement?: string;
       branchId?: string;
+      format?: 'csv' | 'excel' | 'pdf';
     },
   ) {
     return this.exportsService.createExportJob(
@@ -98,6 +99,7 @@ export class ExportsController {
   }
 
   @Post('jobs/:id/run')
+  @SubscriptionBypass()
   @Permissions(PermissionsList.EXPORTS_WRITE)
   runJob(
     @Param('id') id: string,

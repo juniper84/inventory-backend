@@ -14,6 +14,12 @@ export class SettingsController {
     return this.settingsService.getSettings(requireBusinessId(req));
   }
 
+  @Get('history')
+  @Permissions(PermissionsList.SETTINGS_READ)
+  getSettingsHistory(@Req() req: { user?: { businessId: string } }) {
+    return this.settingsService.getSettingsHistory(requireBusinessId(req));
+  }
+
   @Put()
   @Permissions(PermissionsList.SETTINGS_WRITE)
   updateSettings(

@@ -49,6 +49,7 @@ import { AuditContextInterceptor } from './audit/audit-context.interceptor';
 import { TenantThrottlerGuard } from './throttler/tenant-throttler.guard';
 import { BusinessStatusGuard } from './business/business-status.guard';
 import { SupportChatModule } from './support-chat/support-chat.module';
+import { MarketingModule } from './marketing/marketing.module';
 
 @Module({
   imports: [
@@ -102,6 +103,7 @@ import { SupportChatModule } from './support-chat/support-chat.module';
     AccessRequestsModule,
     NotesModule,
     SupportChatModule,
+    MarketingModule,
   ],
   controllers: [AppController],
   providers: [

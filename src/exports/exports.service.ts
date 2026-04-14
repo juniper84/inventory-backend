@@ -219,12 +219,70 @@ export class ExportsService {
       this.prisma.auditLog.findMany({ where: { businessId } }),
     ]);
 
+    // Build lookup maps for human-readable name resolution
+    const branchNameMap = new Map(branches.map((b) => [b.id, b.name]));
+    const userNameMap = new Map(users.map((u) => [u.id, u.name]));
+    const productNameMap = new Map(products.map((p) => [p.id, p.name]));
+    const variantLookup = new Map(variants.map((v) => [v.id, v]));
+    const categoryNameMap = new Map(categories.map((c) => [c.id, c.name]));
+    const supplierNameMap = new Map(suppliers.map((s) => [s.id, s.name]));
+    const customerNameMap = new Map(customers.map((c) => [c.id, c.name]));
+    const roleNameMap = new Map(roles.map((r) => [r.id, r.name]));
     const unitMap = new Map(units.map((unit) => [unit.id, unit]));
     const variantUnitMap = new Map(
       variants.map((variant) => [variant.id, variant.baseUnitId ?? null]),
     );
-    const withUnitLabels = (records: Array<Record<string, unknown>>) =>
+
+    // Enrich records with human-readable names for any known ID fields
+    const resolveNames = (records: Array<Record<string, unknown>>) =>
       records.map((record) => {
+        const extra: Record<string, string> = {};
+        if (record.branchId && branchNameMap.has(record.branchId as string)) {
+          extra.branch_name = branchNameMap.get(record.branchId as string) ?? '';
+        }
+        if (record.userId && userNameMap.has(record.userId as string)) {
+          extra.user_name = userNameMap.get(record.userId as string) ?? '';
+        }
+        if (record.createdById && userNameMap.has(record.createdById as string)) {
+          extra.created_by_name = userNameMap.get(record.createdById as string) ?? '';
+        }
+        if (record.variantId && variantLookup.has(record.variantId as string)) {
+          const v = variantLookup.get(record.variantId as string)!;
+          extra.variant_name = v.name;
+          extra.product_name = productNameMap.get(v.productId) ?? '';
+        }
+        if (record.productId && productNameMap.has(record.productId as string)) {
+          extra.product_name = extra.product_name || (productNameMap.get(record.productId as string) ?? '');
+        }
+        if (record.categoryId && categoryNameMap.has(record.categoryId as string)) {
+          extra.category_name = categoryNameMap.get(record.categoryId as string) ?? '';
+        }
+        if (record.supplierId && supplierNameMap.has(record.supplierId as string)) {
+          extra.supplier_name = supplierNameMap.get(record.supplierId as string) ?? '';
+        }
+        if (record.customerId && customerNameMap.has(record.customerId as string)) {
+          extra.customer_name = customerNameMap.get(record.customerId as string) ?? '';
+        }
+        if (record.roleId && roleNameMap.has(record.roleId as string)) {
+          extra.role_name = roleNameMap.get(record.roleId as string) ?? '';
+        }
+        if (record.sourceBranchId && branchNameMap.has(record.sourceBranchId as string)) {
+          extra.source_branch_name = branchNameMap.get(record.sourceBranchId as string) ?? '';
+        }
+        if (record.destinationBranchId && branchNameMap.has(record.destinationBranchId as string)) {
+          extra.destination_branch_name = branchNameMap.get(record.destinationBranchId as string) ?? '';
+        }
+        if (record.openedById && userNameMap.has(record.openedById as string)) {
+          extra.opened_by_name = userNameMap.get(record.openedById as string) ?? '';
+        }
+        if (record.closedById && userNameMap.has(record.closedById as string)) {
+          extra.closed_by_name = userNameMap.get(record.closedById as string) ?? '';
+        }
+        return { ...record, ...extra };
+      });
+
+    const withUnitLabels = (records: Array<Record<string, unknown>>) =>
+      resolveNames(records).map((record) => {
         const unitId = record.unitId as string | null | undefined;
         const unit = unitId ? (unitMap.get(unitId) ?? null) : null;
         return {
@@ -233,8 +291,10 @@ export class ExportsService {
           unit_label: unit?.label ?? '',
         };
       });
-    const snapshotsWithUnits = stockSnapshots.map((snapshot) => {
-      const unitId = variantUnitMap.get(snapshot.variantId) ?? null;
+    const snapshotsWithUnits = resolveNames(
+      stockSnapshots as unknown as Array<Record<string, unknown>>,
+    ).map((snapshot) => {
+      const unitId = variantUnitMap.get(snapshot.variantId as string) ?? null;
       const unit = unitId ? (unitMap.get(unitId) ?? null) : null;
       return {
         ...snapshot,
@@ -244,6 +304,9 @@ export class ExportsService {
       };
     });
 
+    // Cast helper for resolveNames
+    const asRecords = (arr: unknown[]) => arr as Array<Record<string, unknown>>;
+
     const files = [
       this.buildCsvFile('business.csv', business),
       this.buildCsvFile('business_settings.csv', settings),
@@ -252,60 +315,60 @@ export class ExportsService {
       this.buildCsvFile('subscription_history.csv', subscriptionHistory),
       this.buildCsvFile('export_jobs.csv', exportJobs),
       this.buildCsvFile('users.csv', users),
-      this.buildCsvFile('business_users.csv', memberships),
+      this.buildCsvFile('business_users.csv', resolveNames(asRecords(memberships))),
       this.buildCsvFile('roles.csv', roles),
       this.buildCsvFile('permissions.csv', permissions),
-      this.buildCsvFile('role_permissions.csv', rolePermissions),
-      this.buildCsvFile('user_roles.csv', userRoles),
-      this.buildCsvFile('categories.csv', categories),
-      this.buildCsvFile('products.csv', products),
-      this.buildCsvFile('variants.csv', variants),
-      this.buildCsvFile('barcodes.csv', barcodes),
+      this.buildCsvFile('role_permissions.csv', resolveNames(asRecords(rolePermissions))),
+      this.buildCsvFile('user_roles.csv', resolveNames(asRecords(userRoles))),
+      this.buildCsvFile('categories.csv', resolveNames(asRecords(categories))),
+      this.buildCsvFile('products.csv', resolveNames(asRecords(products))),
+      this.buildCsvFile('variants.csv', resolveNames(asRecords(variants))),
+      this.buildCsvFile('barcodes.csv', resolveNames(asRecords(barcodes))),
       this.buildCsvFile('units.csv', units),
-      this.buildCsvFile('product_images.csv', productImages),
+      this.buildCsvFile('product_images.csv', resolveNames(asRecords(productImages))),
       this.buildCsvFile(
         'branch_variant_availability.csv',
-        branchVariantAvailability,
+        resolveNames(asRecords(branchVariantAvailability)),
       ),
-      this.buildCsvFile('stock_movements.csv', withUnitLabels(stockMovements)),
+      this.buildCsvFile('stock_movements.csv', withUnitLabels(asRecords(stockMovements))),
       this.buildCsvFile('stock_snapshots.csv', snapshotsWithUnits),
-      this.buildCsvFile('batches.csv', batches),
-      this.buildCsvFile('sales.csv', sales),
-      this.buildCsvFile('sale_lines.csv', withUnitLabels(saleLines)),
-      this.buildCsvFile('sale_payments.csv', salePayments),
-      this.buildCsvFile('sale_refunds.csv', saleRefunds),
+      this.buildCsvFile('batches.csv', resolveNames(asRecords(batches))),
+      this.buildCsvFile('sales.csv', resolveNames(asRecords(sales))),
+      this.buildCsvFile('sale_lines.csv', withUnitLabels(asRecords(saleLines))),
+      this.buildCsvFile('sale_payments.csv', resolveNames(asRecords(salePayments))),
+      this.buildCsvFile('sale_refunds.csv', resolveNames(asRecords(saleRefunds))),
       this.buildCsvFile(
         'sale_refund_lines.csv',
-        withUnitLabels(saleRefundLines),
+        withUnitLabels(asRecords(saleRefundLines)),
       ),
-      this.buildCsvFile('sale_settlements.csv', saleSettlements),
-      this.buildCsvFile('receipts.csv', receipts),
-      this.buildCsvFile('purchases.csv', purchases),
-      this.buildCsvFile('purchase_lines.csv', withUnitLabels(purchaseLines)),
-      this.buildCsvFile('purchase_orders.csv', purchaseOrders),
+      this.buildCsvFile('sale_settlements.csv', resolveNames(asRecords(saleSettlements))),
+      this.buildCsvFile('receipts.csv', resolveNames(asRecords(receipts))),
+      this.buildCsvFile('purchases.csv', resolveNames(asRecords(purchases))),
+      this.buildCsvFile('purchase_lines.csv', withUnitLabels(asRecords(purchaseLines))),
+      this.buildCsvFile('purchase_orders.csv', resolveNames(asRecords(purchaseOrders))),
       this.buildCsvFile(
         'purchase_order_lines.csv',
-        withUnitLabels(purchaseOrderLines),
+        withUnitLabels(asRecords(purchaseOrderLines)),
       ),
-      this.buildCsvFile('receiving_lines.csv', withUnitLabels(receivingLines)),
-      this.buildCsvFile('purchase_payments.csv', purchasePayments),
+      this.buildCsvFile('receiving_lines.csv', withUnitLabels(asRecords(receivingLines))),
+      this.buildCsvFile('purchase_payments.csv', resolveNames(asRecords(purchasePayments))),
       this.buildCsvFile('suppliers.csv', suppliers),
-      this.buildCsvFile('supplier_returns.csv', supplierReturns),
+      this.buildCsvFile('supplier_returns.csv', resolveNames(asRecords(supplierReturns))),
       this.buildCsvFile(
         'supplier_return_lines.csv',
-        withUnitLabels(supplierReturnLines),
+        withUnitLabels(asRecords(supplierReturnLines)),
       ),
       this.buildCsvFile('customers.csv', customers),
       this.buildCsvFile('price_lists.csv', priceLists),
-      this.buildCsvFile('price_list_items.csv', priceListItems),
-      this.buildCsvFile('shifts.csv', shifts),
-      this.buildCsvFile('approvals.csv', approvals),
+      this.buildCsvFile('price_list_items.csv', resolveNames(asRecords(priceListItems))),
+      this.buildCsvFile('shifts.csv', resolveNames(asRecords(shifts))),
+      this.buildCsvFile('approvals.csv', resolveNames(asRecords(approvals))),
       this.buildCsvFile('approval_policies.csv', approvalPolicies),
-      this.buildCsvFile('notifications.csv', notifications),
-      this.buildCsvFile('offline_devices.csv', offlineDevices),
-      this.buildCsvFile('offline_actions.csv', offlineActions),
-      this.buildCsvFile('attachments.csv', attachments),
-      this.buildCsvFile('audit_logs.csv', auditLogs),
+      this.buildCsvFile('notifications.csv', resolveNames(asRecords(notifications))),
+      this.buildCsvFile('offline_devices.csv', resolveNames(asRecords(offlineDevices))),
+      this.buildCsvFile('offline_actions.csv', resolveNames(asRecords(offlineActions))),
+      this.buildCsvFile('attachments.csv', resolveNames(asRecords(attachments))),
+      this.buildCsvFile('audit_logs.csv', resolveNames(asRecords(auditLogs))),
     ];
 
     return { files, attachments };
@@ -314,22 +377,30 @@ export class ExportsService {
   async exportStockCsv(businessId: string, branchId?: string) {
     const snapshots = await this.prisma.stockSnapshot.findMany({
       where: { businessId, ...(branchId ? { branchId } : {}) },
-      include: { variant: { include: { baseUnit: true } } },
+      include: {
+        branch: { select: { name: true } },
+        variant: {
+          include: {
+            product: { select: { name: true } },
+            baseUnit: true,
+          },
+        },
+      },
     });
     const headers = [
-      'variant_id',
-      'branch_id',
+      'product_name',
+      'variant_name',
+      'sku',
+      'branch_name',
       'quantity',
-      'unit_id',
-      'unit_code',
       'unit_label',
     ];
     const rows = snapshots.map((snapshot) => ({
-      variant_id: snapshot.variantId,
-      branch_id: snapshot.branchId,
+      product_name: snapshot.variant.product?.name ?? '',
+      variant_name: snapshot.variant.name,
+      sku: snapshot.variant.sku ?? '',
+      branch_name: snapshot.branch.name,
       quantity: snapshot.quantity,
-      unit_id: snapshot.variant.baseUnitId ?? '',
-      unit_code: snapshot.variant.baseUnit?.code ?? '',
       unit_label: snapshot.variant.baseUnit?.label ?? '',
     }));
     const csv = toCsv(headers, rows);
@@ -386,28 +457,32 @@ export class ExportsService {
   async exportOpeningStockCsv(businessId: string, branchId?: string) {
     const snapshots = await this.prisma.stockSnapshot.findMany({
       where: { businessId, ...(branchId ? { branchId } : {}) },
-      include: { variant: { include: { baseUnit: true } } },
+      include: {
+        branch: { select: { name: true } },
+        variant: {
+          include: {
+            product: { select: { name: true } },
+            baseUnit: true,
+          },
+        },
+      },
     });
     const headers = [
-      'variant_id',
-      'branch_id',
+      'product_name',
+      'variant_name',
+      'sku',
+      'branch_name',
       'quantity',
-      'unit_id',
-      'unit_code',
       'unit_label',
-      'batch_id',
-      'expiry_date',
       'unit_cost',
     ];
     const rows = snapshots.map((row) => ({
-      variant_id: row.variantId,
-      branch_id: row.branchId,
+      product_name: row.variant.product?.name ?? '',
+      variant_name: row.variant.name,
+      sku: row.variant.sku ?? '',
+      branch_name: row.branch.name,
       quantity: row.quantity,
-      unit_id: row.variant.baseUnitId ?? '',
-      unit_code: row.variant.baseUnit?.code ?? '',
       unit_label: row.variant.baseUnit?.label ?? '',
-      batch_id: '',
-      expiry_date: '',
       unit_cost: row.variant.defaultCost ?? '',
     }));
     return { filename: 'opening_stock.csv', csv: toCsv(headers, rows) };
@@ -416,11 +491,20 @@ export class ExportsService {
   async exportPriceUpdatesCsv(businessId: string) {
     const variants = await this.prisma.variant.findMany({
       where: { businessId },
-      select: { id: true, defaultPrice: true, vatMode: true },
+      select: {
+        id: true,
+        name: true,
+        sku: true,
+        defaultPrice: true,
+        vatMode: true,
+        product: { select: { name: true } },
+      },
     });
-    const headers = ['variant_id', 'price', 'vat_mode'];
+    const headers = ['product_name', 'variant_name', 'sku', 'price', 'vat_mode'];
     const rows = variants.map((row) => ({
-      variant_id: row.id,
+      product_name: row.product?.name ?? '',
+      variant_name: row.name,
+      sku: row.sku ?? '',
       price: row.defaultPrice ?? '',
       vat_mode: row.vatMode,
     }));
@@ -447,11 +531,18 @@ export class ExportsService {
   }
 
   async exportUsersCsv(businessId: string) {
-    const users = await this.prisma.user.findMany({
-      where: { memberships: { some: { businessId } } },
-      include: { roles: { include: { role: true } } },
-    });
-    const headers = ['name', 'email', 'role', 'status', 'branch_ids'];
+    const [users, branches] = await Promise.all([
+      this.prisma.user.findMany({
+        where: { memberships: { some: { businessId } } },
+        include: { roles: { include: { role: true } } },
+      }),
+      this.prisma.branch.findMany({
+        where: { businessId },
+        select: { id: true, name: true },
+      }),
+    ]);
+    const branchNameMap = new Map(branches.map((b) => [b.id, b.name]));
+    const headers = ['name', 'email', 'role', 'status', 'branch'];
     const rows = users.flatMap((user) => {
       if (!user.roles.length) {
         return [
@@ -460,7 +551,7 @@ export class ExportsService {
             email: user.email,
             role: '',
             status: user.status,
-            branch_ids: '',
+            branch: '',
           },
         ];
       }
@@ -469,7 +560,7 @@ export class ExportsService {
         email: user.email,
         role: role.role.name,
         status: user.status,
-        branch_ids: role.branchId ?? '',
+        branch: role.branchId ? (branchNameMap.get(role.branchId) ?? '') : 'All branches',
       }));
     });
     return { filename: 'users.csv', csv: toCsv(headers, rows) };
@@ -486,12 +577,27 @@ export class ExportsService {
       _sum: { total: true },
       _count: { id: true },
     });
-    const headers = ['customer_id', 'sales_total', 'sale_count'];
-    const rows = data.map((row) => ({
-      customer_id: row.customerId ?? '',
-      sales_total: row._sum.total ?? 0,
-      sale_count: row._count.id ?? 0,
-    }));
+    const customerIds = data
+      .map((row) => row.customerId)
+      .filter((id): id is string => Boolean(id));
+    const customers = customerIds.length
+      ? await this.prisma.customer.findMany({
+          where: { id: { in: customerIds } },
+          select: { id: true, name: true, phone: true, email: true },
+        })
+      : [];
+    const customerMap = new Map(customers.map((c) => [c.id, c]));
+    const headers = ['customer_name', 'phone', 'email', 'sales_total', 'sale_count'];
+    const rows = data.map((row) => {
+      const customer = row.customerId ? customerMap.get(row.customerId) : null;
+      return {
+        customer_name: customer?.name ?? '',
+        phone: customer?.phone ?? '',
+        email: customer?.email ?? '',
+        sales_total: row._sum.total ?? 0,
+        sale_count: row._count.id ?? 0,
+      };
+    });
     return { filename: 'customer_reports.csv', csv: toCsv(headers, rows) };
   }
 
@@ -510,20 +616,42 @@ export class ExportsService {
       orderBy: { createdAt: 'desc' },
       take: 10000,
     });
+
+    // Resolve user, branch, and role names for human-readable export
+    const userIds = [...new Set(logs.map((l) => l.userId).filter(Boolean))] as string[];
+    const branchIds = [...new Set(logs.map((l) => l.branchId).filter(Boolean))] as string[];
+    const roleIds = [...new Set(logs.map((l) => l.roleId).filter(Boolean))] as string[];
+    const [users, auditBranches, roles] = await Promise.all([
+      userIds.length
+        ? this.prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true } })
+        : Promise.resolve([] as { id: string; name: string }[]),
+      branchIds.length
+        ? this.prisma.branch.findMany({ where: { id: { in: branchIds } }, select: { id: true, name: true } })
+        : Promise.resolve([] as { id: string; name: string }[]),
+      roleIds.length
+        ? this.prisma.role.findMany({ where: { id: { in: roleIds } }, select: { id: true, name: true } })
+        : Promise.resolve([] as { id: string; name: string }[]),
+    ]);
+    const userNameMap = new Map(users.map((u) => [u.id, u.name]));
+    const branchNameMap = new Map(auditBranches.map((b) => [b.id, b.name]));
+    const roleNameMap = new Map(roles.map((r) => [r.id, r.name]));
+
     const headers = [
       'id',
-      'businessId',
-      'userId',
-      'roleId',
-      'branchId',
-      'requestId',
-      'sessionId',
-      'correlationId',
       'action',
       'resourceType',
       'resourceId',
       'outcome',
       'reason',
+      'user_name',
+      'branch_name',
+      'role_name',
+      'userId',
+      'branchId',
+      'roleId',
+      'requestId',
+      'sessionId',
+      'correlationId',
       'metadata',
       'before',
       'after',
@@ -540,6 +668,9 @@ export class ExportsService {
         headers,
         logs.map((log) => ({
           ...log,
+          user_name: log.userId ? (userNameMap.get(log.userId) ?? '') : '',
+          branch_name: log.branchId ? (branchNameMap.get(log.branchId) ?? '') : '',
+          role_name: log.roleId ? (roleNameMap.get(log.roleId) ?? '') : '',
           metadata: this.serializeValue(log.metadata),
           before: this.serializeValue(log.before),
           after: this.serializeValue(log.after),
@@ -552,7 +683,12 @@ export class ExportsService {
   async createExportJob(
     businessId: string,
     userId: string,
-    data: { type: ExportJobType; acknowledgement?: string; branchId?: string },
+    data: {
+      type: ExportJobType;
+      acknowledgement?: string;
+      branchId?: string;
+      format?: 'csv' | 'excel' | 'pdf';
+    },
     branchScope: string[] = [],
   ) {
     const scopedBranch = this.resolveBranchScope(branchScope, data.branchId);
@@ -567,6 +703,14 @@ export class ExportsService {
         throw new ForbiddenException('Branch-scoped export type not allowed.');
       }
     }
+    const format = data.format ?? 'csv';
+    const jobMetadata: Record<string, unknown> = {};
+    if (data.acknowledgement) {
+      jobMetadata.acknowledgement = data.acknowledgement;
+    }
+    if (format !== 'csv') {
+      jobMetadata.format = format;
+    }
     const job = await this.prisma.exportJob.create({
       data: {
         businessId,
@@ -574,9 +718,7 @@ export class ExportsService {
         type: data.type,
         status: ExportJobStatus.PENDING,
         requestedByUserId: userId,
-        metadata: data.acknowledgement
-          ? ({ acknowledgement: data.acknowledgement } as Prisma.InputJsonValue)
-          : {},
+        metadata: jobMetadata as Prisma.InputJsonValue,
       },
     });
     await this.auditService.logEvent({
@@ -586,7 +728,7 @@ export class ExportsService {
       resourceType: 'ExportJob',
       resourceId: job.id,
       outcome: 'SUCCESS',
-      metadata: { type: data.type },
+      metadata: { type: data.type, format },
     });
     return job;
   }
@@ -860,10 +1002,51 @@ export class ExportsService {
       }
 
       if (payload) {
-        metadata = {
-          filename: payload.filename,
-          csv: payload.csv,
-        };
+        const storedFormat =
+          job.metadata && typeof job.metadata === 'object'
+            ? (job.metadata as { format?: string }).format
+            : undefined;
+        const format = (storedFormat ?? 'csv') as 'csv' | 'excel' | 'pdf';
+
+        if (format === 'excel') {
+          const excelBuffer = await this.csvToExcelBuffer(
+            payload.csv,
+            payload.filename.replace(/\.csv$/, ''),
+          );
+          const key = `exports/${job.businessId}/${job.id}/${payload.filename.replace(/\.csv$/, '.xlsx')}`;
+          const upload = await this.storageService.uploadObject({
+            key,
+            body: excelBuffer,
+            contentType:
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          });
+          metadata = {
+            filename: payload.filename.replace(/\.csv$/, '.xlsx'),
+            format: 'excel',
+            url: upload.publicUrl,
+          };
+        } else if (format === 'pdf') {
+          const pdfBuffer = await this.csvToPdfBuffer(
+            payload.csv,
+            payload.filename.replace(/\.csv$/, ''),
+          );
+          const key = `exports/${job.businessId}/${job.id}/${payload.filename.replace(/\.csv$/, '.pdf')}`;
+          const upload = await this.storageService.uploadObject({
+            key,
+            body: pdfBuffer,
+            contentType: 'application/pdf',
+          });
+          metadata = {
+            filename: payload.filename.replace(/\.csv$/, '.pdf'),
+            format: 'pdf',
+            url: upload.publicUrl,
+          };
+        } else {
+          metadata = {
+            filename: payload.filename,
+            csv: payload.csv,
+          };
+        }
       }
 
       const updated = await this.prisma.exportJob.update({
@@ -971,6 +1154,47 @@ export class ExportsService {
       },
       lastJob,
     };
+  }
+
+  /**
+   * Convert CSV string to an Excel workbook buffer.
+   */
+  async csvToExcelBuffer(csv: string, sheetName = 'Data'): Promise<Buffer> {
+    const ExcelJS = require('exceljs');
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet(sheetName);
+    const lines = csv.split('\n').filter((l: string) => l.trim());
+    if (lines.length > 0) {
+      const headers = lines[0].split(',');
+      sheet.addRow(headers);
+      for (let i = 1; i < lines.length; i++) {
+        sheet.addRow(lines[i].split(','));
+      }
+    }
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  /**
+   * Convert CSV string to a simple PDF buffer.
+   */
+  async csvToPdfBuffer(csv: string, title: string): Promise<Buffer> {
+    const PDFDocument = require('pdfkit');
+    return new Promise<Buffer>((resolve, reject) => {
+      const doc = new PDFDocument({ size: 'A4', margin: 40 });
+      const buffers: Buffer[] = [];
+      doc.on('data', (chunk: Buffer) => buffers.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+      doc.on('error', (err: Error) => reject(err));
+      doc.fontSize(16).text(title, { align: 'center' });
+      doc.moveDown();
+      const lines = csv.split('\n').filter((l: string) => l.trim());
+      doc.fontSize(8);
+      for (const line of lines) {
+        doc.text(line);
+      }
+      doc.end();
+    });
   }
 
   private resolveBranchScope(branchScope: string[], branchId?: string) {

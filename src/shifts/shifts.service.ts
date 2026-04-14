@@ -3,6 +3,7 @@ import { Prisma, ShiftStatus } from '@prisma/client';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { generateReferenceNumber } from '../common/reference-number';
 import { DEFAULT_POS_POLICIES } from '../settings/defaults';
 import {
   buildPaginatedResponse,
@@ -89,6 +90,7 @@ export class ShiftsService {
       }
       return tx.shift.create({
         data: {
+          referenceNumber: await generateReferenceNumber(tx, 'shift', businessId),
           businessId,
           branchId: data.branchId,
           openedById: userId,
@@ -100,12 +102,47 @@ export class ShiftsService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: shift.branchId,
       action: 'SHIFT_OPEN',
       resourceType: 'Shift',
       resourceId: shift.id,
       outcome: 'SUCCESS',
     });
     return shift;
+  }
+
+  async getShiftPerformance(businessId: string, shiftId: string) {
+    const shift = await this.prisma.shift.findFirst({
+      where: { id: shiftId, businessId },
+    });
+    if (!shift) {
+      return null;
+    }
+    const dateFilter: { gte: Date; lte?: Date } = { gte: shift.openedAt };
+    if (shift.closedAt) {
+      dateFilter.lte = shift.closedAt;
+    }
+    const sales = await this.prisma.sale.aggregate({
+      where: {
+        businessId,
+        branchId: shift.branchId,
+        status: 'COMPLETED',
+        createdAt: dateFilter,
+      },
+      _sum: { total: true },
+      _count: { id: true },
+    });
+    const saleCount = sales._count.id;
+    const saleTotal = Number(sales._sum.total ?? 0);
+    return {
+      shiftId: shift.id,
+      branchId: shift.branchId,
+      openedAt: shift.openedAt,
+      closedAt: shift.closedAt,
+      saleCount,
+      saleTotal,
+      avgTransaction: saleCount > 0 ? saleTotal / saleCount : 0,
+    };
   }
 
   async closeShift(
@@ -164,6 +201,7 @@ export class ShiftsService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: shift.branchId,
       action: 'SHIFT_CLOSE',
       resourceType: 'Shift',
       resourceId: updated.id,

@@ -55,6 +55,18 @@ export class BranchesController {
     return this.branchesService.create(requireBusinessId(req), requireUserId(req), body);
   }
 
+  @Get(':id/performance')
+  @Permissions(PermissionsList.SETTINGS_READ)
+  getBranchPerformance(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.branchesService.getBranchPerformance(
+      requireBusinessId(req),
+      id,
+    );
+  }
+
   @Put(':id')
   @Permissions(PermissionsList.SETTINGS_WRITE)
   update(
@@ -66,6 +78,8 @@ export class BranchesController {
       address?: string;
       phone?: string;
       priceListId?: string | null;
+      openingTime?: string | null;
+      closingTime?: string | null;
     },
   ) {
     return this.branchesService.update(requireBusinessId(req), id, requireUserId(req), body);

@@ -34,6 +34,7 @@ type NoteUpdateInput = {
   visibility?: 'PRIVATE' | 'BRANCH' | 'BUSINESS';
   branchId?: string | null;
   status?: RecordStatus;
+  isPinned?: boolean;
   tags?: string[];
   links?: NoteLinkInput[];
 };
@@ -211,6 +212,8 @@ export class NotesService {
       );
     }
 
+    const visibilityFilter = this.buildVisibilityFilter(context);
+
     const where: Prisma.NoteWhereInput = {
       businessId,
       ...(query.status ? { status: query.status as RecordStatus } : {}),
@@ -232,13 +235,18 @@ export class NotesService {
       ...(resourceType && resourceId
         ? { links: { some: { resourceType, resourceId } } }
         : {}),
-      ...this.buildVisibilityFilter(context),
+      OR: [
+        // Notes the user can see via normal visibility rules
+        { ...visibilityFilter },
+        // Notes explicitly shared with the user
+        { shares: { some: { userId: context.userId, businessId } } },
+      ],
     };
 
     const [items, total] = await Promise.all([
       this.prisma.note.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
         include: {
           links: true,
           author: { select: { id: true, name: true, email: true } },
@@ -402,6 +410,9 @@ export class NotesService {
               ? existing.branchId
               : (data.branchId ?? null),
           status: (data.status ?? existing.status) as any,
+          ...(typeof data.isPinned === 'boolean'
+            ? { isPinned: data.isPinned }
+            : {}),
           ...(tags ? { tags } : {}),
         },
       });
@@ -712,7 +723,7 @@ export class NotesService {
             businessId,
             id: { contains: q, mode: Prisma.QueryMode.insensitive },
           },
-          select: { id: true, status: true },
+          select: { id: true, referenceNumber: true, status: true },
           take: 20,
         });
       case 'Purchase':
@@ -721,7 +732,7 @@ export class NotesService {
             businessId,
             id: { contains: q, mode: Prisma.QueryMode.insensitive },
           },
-          select: { id: true, status: true, total: true },
+          select: { id: true, referenceNumber: true, status: true, total: true },
           take: 20,
         });
       case 'Transfer': {
@@ -741,6 +752,7 @@ export class NotesService {
           },
           select: {
             id: true,
+            referenceNumber: true,
             status: true,
             sourceBranch: { select: { name: true } },
             destinationBranch: { select: { name: true } },
@@ -752,6 +764,52 @@ export class NotesService {
         return [];
     }
   }
+
+  // ── Note Sharing ──────────────────────────────────────────────
+
+  async shareNote(businessId: string, noteId: string, userId: string, targetUserId: string) {
+    const note = await this.prisma.note.findFirst({ where: { id: noteId, businessId } });
+    if (!note) return null;
+    return this.prisma.noteShare.upsert({
+      where: { noteId_userId: { noteId, userId: targetUserId } },
+      create: { noteId, userId: targetUserId, businessId },
+      update: {},
+    });
+  }
+
+  async unshareNote(businessId: string, noteId: string, targetUserId: string) {
+    return this.prisma.noteShare.deleteMany({
+      where: { noteId, userId: targetUserId, businessId },
+    });
+  }
+
+  async listNoteShares(businessId: string, noteId: string) {
+    return this.prisma.noteShare.findMany({
+      where: { noteId, businessId },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+  }
+
+  // ── Note Templates ─────────────────────────────────────────────
+
+  async listTemplates(businessId: string) {
+    return this.prisma.noteTemplate.findMany({
+      where: { businessId },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async createTemplate(businessId: string, userId: string, data: { name: string; title: string; body?: string; visibility?: string; tags?: string[] }) {
+    return this.prisma.noteTemplate.create({
+      data: { businessId, createdById: userId, name: data.name, title: data.title, body: data.body ?? '', visibility: data.visibility ?? 'PRIVATE', tags: data.tags ?? [] },
+    });
+  }
+
+  async deleteTemplate(businessId: string, templateId: string) {
+    return this.prisma.noteTemplate.deleteMany({ where: { id: templateId, businessId } });
+  }
+
+  // ── Meta ────────────────────────────────────────────────────────
 
   async getMeta(businessId: string) {
     const subscription =

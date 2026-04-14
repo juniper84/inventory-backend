@@ -63,6 +63,26 @@ export class CatalogController {
     );
   }
 
+  @Post('categories/bulk-status')
+  @Permissions(PermissionsList.CATALOG_WRITE)
+  bulkUpdateCategoryStatus(
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Body() body: { categoryIds: string[]; status: string },
+  ) {
+    if (!body.categoryIds?.length) {
+      throw new BadRequestException('categoryIds is required.');
+    }
+    if (!body.status?.trim()) {
+      throw new BadRequestException('status is required.');
+    }
+    return this.catalogService.bulkUpdateCategoryStatus(
+      requireBusinessId(req),
+      requireUserId(req),
+      body.categoryIds,
+      body.status,
+    );
+  }
+
   @Get('products')
   @Permissions(PermissionsList.CATALOG_READ)
   listProducts(

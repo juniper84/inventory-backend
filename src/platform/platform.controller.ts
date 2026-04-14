@@ -105,6 +105,56 @@ export class PlatformController {
     return this.platformService.listBusinesses(query);
   }
 
+  @Get('businesses/counts')
+  @UseGuards(PlatformGuard)
+  getBusinessesCounts() {
+    return this.platformService.getBusinessesCounts();
+  }
+
+  @Get('businesses/:id/exports')
+  @UseGuards(PlatformGuard)
+  listBusinessExports(
+    @Param('id') id: string,
+    @Query()
+    query: {
+      limit?: string;
+      cursor?: string;
+      status?: string;
+      type?: string;
+    },
+  ) {
+    return this.platformService.listExportJobs({ ...query, businessId: id });
+  }
+
+  @Get('businesses/:id/activity-heatmap')
+  @UseGuards(PlatformGuard)
+  getBusinessActivityHeatmap(
+    @Param('id') id: string,
+    @Query() query: { days?: string },
+  ) {
+    const days = Math.max(1, Math.min(365, parseInt(query.days ?? '90', 10) || 90));
+    return this.platformService.getBusinessActivityHeatmap(id, days);
+  }
+
+  @Post('businesses/bulk-action')
+  @UseGuards(PlatformGuard)
+  bulkBusinessAction(
+    @Req() req: { user?: { sub?: string } },
+    @Body()
+    body: {
+      businessIds: string[];
+      action: 'SUSPEND' | 'EXTEND_TRIAL' | 'READ_ONLY' | 'ARCHIVE';
+      params?: { days?: number; reason?: string; enabled?: boolean };
+    },
+  ) {
+    return this.platformService.bulkBusinessAction({
+      businessIds: body.businessIds,
+      action: body.action,
+      params: body.params ?? {},
+      platformAdminId: requireUserId(req),
+    });
+  }
+
   @Get('metrics')
   @UseGuards(PlatformGuard)
   getMetrics(
@@ -151,13 +201,19 @@ export class PlatformController {
     return this.platformService.getQueuesSummary();
   }
 
+  @Get('businesses/orphans')
+  @UseGuards(PlatformGuard)
+  findOrphanBusinesses() {
+    return this.platformService.findOrphanBusinesses();
+  }
+
   @Get('businesses/:businessId/workspace')
   @UseGuards(PlatformGuard)
   getBusinessWorkspace(@Param('businessId') businessId: string) {
     return this.platformService.getBusinessWorkspace(businessId);
   }
 
-  @Post('businesses/:businessId/actions/:action/preflight')
+  @Get('businesses/:businessId/actions/:action/preflight')
   @UseGuards(PlatformGuard)
   getBusinessActionPreflight(
     @Param('businessId') businessId: string,
@@ -180,6 +236,8 @@ export class PlatformController {
       correlationId?: string;
       requestId?: string;
       sessionId?: string;
+      from?: string;
+      to?: string;
     },
   ) {
     return this.platformService.getAuditTimeline(query);
@@ -460,6 +518,21 @@ export class PlatformController {
     });
   }
 
+  @Post('support-access/sessions/:id/extend')
+  @UseGuards(PlatformGuard)
+  extendSupportSession(
+    @Req() req: { user?: { sub?: string } },
+    @Param('id') id: string,
+    @Body() body: { additionalHours: number; reason: string },
+  ) {
+    return this.supportAccessService.extendSession({
+      sessionId: id,
+      platformAdminId: requireUserId(req),
+      additionalHours: Number(body.additionalHours),
+      reason: body.reason,
+    });
+  }
+
   @Post('support-access/requests/:id/activate')
   @UseGuards(PlatformGuard)
   activateSupportRequest(
@@ -689,12 +762,20 @@ export class PlatformController {
   approveSubscriptionRequest(
     @Req() req: { user?: { sub?: string } },
     @Param('id') id: string,
-    @Body() body: { responseNote?: string },
+    @Body() body: {
+      responseNote?: string;
+      durationMonths?: number;
+      isPaid?: boolean;
+      amountDue?: number;
+    },
   ) {
     return this.platformService.approveSubscriptionRequest({
       requestId: id,
       platformAdminId: requireUserId(req),
       responseNote: body.responseNote,
+      durationMonths: body.durationMonths,
+      isPaid: body.isPaid,
+      amountDue: body.amountDue,
     });
   }
 
@@ -854,6 +935,61 @@ export class PlatformController {
     });
   }
 
+  @Patch('announcements/:announcementId')
+  @UseGuards(PlatformGuard)
+  updateAnnouncement(
+    @Req() req: { user?: { sub?: string } },
+    @Param('announcementId') announcementId: string,
+    @Body()
+    body: {
+      title?: string;
+      message?: string;
+      severity?: string;
+      reason?: string | null;
+      startsAt?: string | null;
+      endsAt?: string | null;
+      targetBusinessIds?: string[];
+      targetTiers?: string[];
+      targetStatuses?: string[];
+    },
+  ) {
+    return this.platformService.updateAnnouncement({
+      announcementId,
+      platformAdminId: requireUserId(req),
+      title: body.title,
+      message: body.message,
+      severity: body.severity,
+      reason: body.reason,
+      startsAt:
+        body.startsAt === undefined
+          ? undefined
+          : body.startsAt === null
+            ? null
+            : new Date(body.startsAt),
+      endsAt:
+        body.endsAt === undefined
+          ? undefined
+          : body.endsAt === null
+            ? null
+            : new Date(body.endsAt),
+      targetBusinessIds: body.targetBusinessIds,
+      targetTiers: body.targetTiers,
+      targetStatuses: body.targetStatuses,
+    });
+  }
+
+  @Delete('announcements/:announcementId')
+  @UseGuards(PlatformGuard)
+  deleteAnnouncement(
+    @Req() req: { user?: { sub?: string } },
+    @Param('announcementId') announcementId: string,
+  ) {
+    return this.platformService.deleteAnnouncement({
+      announcementId,
+      platformAdminId: requireUserId(req),
+    });
+  }
+
   @Post('announcements/preview')
   @UseGuards(PlatformGuard)
   previewAnnouncementAudience(
@@ -873,8 +1009,16 @@ export class PlatformController {
 
   @Get('announcements')
   @UseGuards(PlatformGuard)
-  listAnnouncements() {
-    return this.platformService.listAnnouncements();
+  listAnnouncements(
+    @Query()
+    query: {
+      limit?: string;
+      cursor?: string;
+      status?: 'active' | 'upcoming' | 'ended';
+      severity?: string;
+    },
+  ) {
+    return this.platformService.listAnnouncements(query);
   }
 
   @Patch('announcements/:announcementId/end')

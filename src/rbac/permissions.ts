@@ -54,6 +54,7 @@ export const PermissionsList = {
   SUBSCRIPTION_READ: 'subscription.read',
   SUBSCRIPTION_REQUEST: 'subscription.request',
   SUPPORT_CHAT_USE: 'support-chat.use',
+  IMPORTS_WRITE: 'imports.write',
 } as const;
 
 export type PermissionCode =

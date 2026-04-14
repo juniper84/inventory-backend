@@ -4,6 +4,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -21,6 +22,9 @@ import { MailerService } from '../mailer/mailer.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { I18nService } from '../i18n/i18n.service';
 import { buildBrandedEmail } from '../mailer/email-templates';
+import { BusinessService } from '../business/business.service';
+import { UsersService } from '../users/users.service';
+import { SubscriptionTier } from '@prisma/client';
 
 const SUPPORT_PERMISSIONS = [
   PermissionsList.BUSINESS_READ,
@@ -70,6 +74,8 @@ const SUPPORT_SCOPE_PERMISSIONS: Record<string, string[]> = {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly jwtService: JwtService,
     private readonly prisma: PrismaService,
@@ -81,6 +87,8 @@ export class AuthService {
     private readonly mailerService: MailerService,
     private readonly notificationsService: NotificationsService,
     private readonly i18n: I18nService,
+    private readonly businessService: BusinessService,
+    private readonly usersService: UsersService,
   ) {}
 
   async signIn(
@@ -222,7 +230,7 @@ export class AuthService {
     };
 
     const accessToken = await this.jwtService.signAsync(payload);
-    const refreshToken = await this.issueRefreshToken(user.id, deviceId);
+    const refreshToken = await this.issueRefreshToken(user.id, deviceId, resolvedBusinessId);
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -372,7 +380,7 @@ export class AuthService {
     };
 
     const accessToken = await this.jwtService.signAsync(payload);
-    const newRefreshToken = await this.issueRefreshToken(user.id, deviceId);
+    const newRefreshToken = await this.issueRefreshToken(user.id, deviceId, businessId);
 
     await this.prisma.refreshToken.update({
       where: { id: stored.id },
@@ -500,10 +508,15 @@ export class AuthService {
       }),
       preheader: this.i18n.t(locale, 'email.passwordReset.title'),
     });
-    await this.mailerService.sendEmail({
-      to: user.email,
-      ...emailPayload,
-    });
+    try {
+      await this.mailerService.sendEmail({
+        to: user.email,
+        ...emailPayload,
+      });
+    } catch (err) {
+      this.logger.error(`Failed to send password reset email to ${user.email}`, err);
+      throw new BadRequestException('Failed to send reset email. Please try again later.');
+    }
 
     return { requested: true };
   }
@@ -752,12 +765,11 @@ export class AuthService {
       };
     }
 
-    const session = await this.switchBusinessForUser({
-      userId: user.id,
-      businessId: resolvedBusinessId,
+    const session = await this.issueSessionForUser(
+      user,
+      resolvedBusinessId,
       deviceId,
-      metadata: { source: 'email-verification' },
-    });
+    );
 
     return {
       verified: true,
@@ -773,7 +785,7 @@ export class AuthService {
     };
   }
 
-  async resetPassword(token: string, newPassword: string, userId?: string) {
+  async resetPassword(token: string, newPassword: string) {
     if (!validatePassword(newPassword)) {
       throw new UnauthorizedException('Password does not meet requirements.');
     }
@@ -782,7 +794,6 @@ export class AuthService {
       where: {
         tokenHash,
         usedAt: null,
-        ...(userId ? { userId } : {}),
       },
     });
 
@@ -841,6 +852,8 @@ export class AuthService {
       throw new BadRequestException('New password does not meet requirements.');
     }
     const businessId = user.memberships[0]?.businessId ?? 'unknown';
+    // Revoke all active sessions so compromised tokens can't be reused
+    await this.revokeAllRefreshTokens(userId);
     await this.prisma.user.update({
       where: { id: userId },
       data: {
@@ -972,7 +985,7 @@ export class AuthService {
       data: { revokedAt: new Date() },
     });
 
-    const refreshToken = await this.issueRefreshToken(user.id, data.deviceId);
+    const refreshToken = await this.issueRefreshToken(user.id, data.deviceId, data.businessId);
 
     await this.auditService.logEvent({
       businessId: data.businessId,
@@ -983,6 +996,153 @@ export class AuthService {
       outcome: 'SUCCESS',
       metadata: data.metadata,
     });
+
+    return { accessToken, refreshToken };
+  }
+
+  /**
+   * Atomic signup: creates business + user + role assignment in one transaction.
+   * If the email belongs to a verified user, links them to the new business
+   * instead of creating a new user (multi-business signup).
+   */
+  async signup(data: {
+    businessName: string;
+    ownerName: string;
+    email: string;
+    password: string;
+    tier?: SubscriptionTier;
+  }) {
+    const passwordHash = hashPassword(data.password);
+
+    // seedPermissions is idempotent — safe to call outside the transaction.
+    // We call createBusiness's public prepareSeedPermissions helper.
+    await this.businessService.ensurePermissionsSeeded();
+
+    const txResult = await this.prisma.$transaction(
+      async (tx) => {
+        // 1. Create the business (inline, using the tx client)
+        const { business, branch, roleMap } =
+          await this.businessService.createBusinessWithTx(tx, {
+            name: data.businessName,
+            tier: data.tier,
+            actorId: 'signup',
+          });
+
+        // 2. Create subscription INSIDE the transaction so assertLimit can find it
+        await this.subscriptionService.createTrialSubscription(
+          business.id,
+          data.tier ?? SubscriptionTier.BUSINESS,
+          'signup',
+          tx,
+        );
+
+        // 3. Create (or link) the user
+        const userResult = await this.usersService.createWithTx(
+          tx,
+          business.id,
+          {
+            name: data.ownerName,
+            email: data.email,
+            status: 'PENDING',
+            tempPassword: data.password,
+            mustResetPassword: false,
+          },
+          passwordHash,
+        );
+
+        // 4. Assign System Owner role
+        const systemOwnerRoleId = roleMap['System Owner'];
+        if (systemOwnerRoleId) {
+          await this.usersService.assignRole(
+            userResult.user.id,
+            systemOwnerRoleId,
+            null,
+            tx,
+          );
+        }
+
+        return {
+          business,
+          branch,
+          roleMap,
+          owner: userResult.user,
+          isExistingUser: userResult.isExistingUser,
+        };
+      },
+      { timeout: 15000 },
+    );
+
+    // Post-transaction work: audit logging (subscription already created inside tx)
+    await this.businessService.afterBusinessCreated(
+      {
+        business: txResult.business,
+        branch: txResult.branch,
+        roleMap: txResult.roleMap,
+      },
+      { tier: data.tier, actorId: 'signup', skipSubscription: true },
+    );
+
+    // Only send verification email for new users (not already verified)
+    if (!txResult.isExistingUser) {
+      await this.requestEmailVerification(
+        txResult.owner.id,
+        txResult.business.id,
+      );
+      return {
+        verificationRequired: true,
+        userId: txResult.owner.id,
+        businessId: txResult.business.id,
+        isExistingUser: false,
+      };
+    }
+
+    // Existing verified user — generate tokens so they can auto-login into the new business
+    const session = await this.issueSessionForUser(
+      txResult.owner,
+      txResult.business.id,
+    );
+
+    return {
+      verificationRequired: false,
+      userId: txResult.owner.id,
+      businessId: txResult.business.id,
+      isExistingUser: true,
+      accessToken: session.accessToken,
+      refreshToken: session.refreshToken,
+      user: {
+        id: txResult.owner.id,
+        email: txResult.owner.email,
+        name: txResult.owner.name,
+      },
+    };
+  }
+
+  /**
+   * Generate access + refresh tokens for a user + business without requiring
+   * an existing session. Used by signup (existing users) and email verification.
+   */
+  private async issueSessionForUser(
+    user: { id: string; email: string; name: string },
+    businessId: string,
+    deviceId?: string,
+  ) {
+    const access = await this.rbacService.resolveUserAccess(user.id, businessId);
+    const subscription = await this.subscriptionService.getSubscription(businessId);
+
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      businessId,
+      deviceId: deviceId ?? 'signup',
+      roleIds: access.roleIds,
+      permissions: access.permissions,
+      branchScope: access.branchScope,
+      subscriptionState: subscription?.status ?? 'UNKNOWN',
+      scope: 'business',
+    };
+
+    const accessToken = await this.jwtService.signAsync(payload);
+    const refreshToken = await this.issueRefreshToken(user.id, deviceId ?? 'signup', businessId);
 
     return { accessToken, refreshToken };
   }
@@ -1204,7 +1364,7 @@ export class AuthService {
     };
   }
 
-  private async issueRefreshToken(userId: string, deviceId?: string) {
+  private async issueRefreshToken(userId: string, deviceId?: string, businessId?: string) {
     const token = crypto.randomBytes(48).toString('hex');
     const tokenHash = this.hashToken(token);
     const expiresInDays = parseInt(
@@ -1218,6 +1378,7 @@ export class AuthService {
       data: {
         userId,
         deviceId: deviceId ?? null,
+        businessId: businessId ?? null,
         tokenHash,
         expiresAt,
       },

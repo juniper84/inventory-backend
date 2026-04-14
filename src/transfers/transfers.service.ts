@@ -8,6 +8,7 @@ import {
   finalizeIdempotency,
 } from '../common/idempotency';
 import { labelWithFallback } from '../common/labels';
+import { generateReferenceNumber } from '../common/reference-number';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -108,6 +109,7 @@ export class TransfersService {
     await this.auditService.logEvent({
       businessId: transfer.businessId,
       userId,
+      branchId: transfer.sourceBranchId,
       action: 'EXPENSE_CREATE',
       resourceType: 'Expense',
       resourceId: expense.id,
@@ -366,6 +368,7 @@ export class TransfersService {
         }
         return tx.transfer.create({
           data: {
+            referenceNumber: await generateReferenceNumber(tx, 'transfer', businessId),
             businessId,
             sourceBranchId: data.sourceBranchId,
             destinationBranchId: data.destinationBranchId,
@@ -404,6 +407,7 @@ export class TransfersService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: transfer.sourceBranchId,
       action: 'TRANSFER_CREATE',
       resourceType: 'Transfer',
       resourceId: transfer.id,
@@ -548,6 +552,7 @@ export class TransfersService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: updated.sourceBranchId,
       action: 'TRANSFER_APPROVE',
       resourceType: 'Transfer',
       resourceId: updated.id,
@@ -679,6 +684,7 @@ export class TransfersService {
             await this.auditService.logEvent({
               businessId,
               userId,
+              branchId: transfer.destinationBranchId,
               action: 'BATCH_CREATE',
               resourceType: 'Batch',
               resourceId: destBatch.id,
@@ -716,6 +722,7 @@ export class TransfersService {
               await this.auditService.logEvent({
                 businessId,
                 userId,
+                branchId: transfer.destinationBranchId,
                 action: 'BATCH_CREATE',
                 resourceType: 'Batch',
                 resourceId: destBatch.id,
@@ -829,6 +836,7 @@ export class TransfersService {
         stockAuditEvents.push({
           businessId,
           userId,
+          branchId: transfer.destinationBranchId,
           action: 'STOCK_MOVEMENT_CREATE',
           resourceType: 'StockMovement',
           resourceId: txResult.movements[i].id,
@@ -846,6 +854,7 @@ export class TransfersService {
         stockAuditEvents.push({
           businessId,
           userId,
+          branchId: transfer.destinationBranchId,
           action: 'STOCK_SNAPSHOT_UPDATE',
           resourceType: 'StockSnapshot',
           resourceId: txResult.snapshots[i].id,
@@ -880,6 +889,7 @@ export class TransfersService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: transfer.destinationBranchId,
       action: 'TRANSFER_RECEIVE',
       resourceType: 'Transfer',
       resourceId: transfer.id,
@@ -985,6 +995,7 @@ export class TransfersService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: updated.sourceBranchId,
       action: 'TRANSFER_CANCEL',
       resourceType: 'Transfer',
       resourceId: updated.id,

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { GainReason, LossReason, Prisma, StockMovementType, VarianceType } from '@prisma/client';
 import { ApprovalsService } from '../approvals/approvals.service';
+import { generateReferenceNumber } from '../common/reference-number';
 import { AuditService } from '../audit/audit.service';
 import {
   claimIdempotency,
@@ -82,8 +83,40 @@ export class StockService {
         ? this.prisma.stockSnapshot.count({ where })
         : Promise.resolve(null),
     ]);
+    // Enrich with sales velocity (avg daily units sold over last 30 days) for days-remaining estimate
+    const variantIds = items.map((s) => s.variantId);
+    let velocityMap = new Map<string, number>();
+    if (variantIds.length > 0) {
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const salesData = await this.prisma.saleLine.groupBy({
+        by: ['variantId'],
+        where: {
+          variantId: { in: variantIds },
+          sale: { businessId, status: 'COMPLETED', createdAt: { gte: thirtyDaysAgo } },
+        },
+        _sum: { quantity: true },
+      });
+      for (const row of salesData) {
+        const totalSold = Number(row._sum.quantity ?? 0);
+        const dailyAvg = totalSold / 30;
+        velocityMap.set(row.variantId, dailyAvg);
+      }
+    }
+
+    const enriched = items.map((item) => {
+      const dailyVelocity = velocityMap.get(item.variantId) ?? 0;
+      const qty = Number(item.quantity);
+      const daysRemaining = dailyVelocity > 0 ? Math.round(qty / dailyVelocity) : null;
+      return {
+        ...item,
+        dailyVelocity: Math.round(dailyVelocity * 100) / 100,
+        daysRemaining,
+      };
+    });
+
     return buildPaginatedResponse(
-      items,
+      enriched,
       pagination.take,
       typeof total === 'number' ? total : undefined,
     );
@@ -95,11 +128,13 @@ export class StockService {
       branchId?: string;
       variantId?: string;
       type?: StockMovementType;
+      types?: StockMovementType[];
       actorId?: string;
       from?: string;
       to?: string;
       search?: string;
       reason?: string;
+      includeTotal?: string;
     },
     branchScope: string[] = [],
   ) {
@@ -109,61 +144,82 @@ export class StockService {
     const from = query.from ? new Date(query.from) : undefined;
     const to = query.to ? new Date(query.to) : undefined;
     const branchFilter = this.resolveBranchScope(branchScope, query.branchId);
-    const items = await this.prisma.stockMovement.findMany({
-      where: {
-        businessId,
-        ...branchFilter,
-        ...(query.variantId ? { variantId: query.variantId } : {}),
-        ...(query.type ? { movementType: query.type } : {}),
-        ...(query.actorId ? { createdById: query.actorId } : {}),
-        ...(reason
-          ? { reason: { contains: reason, mode: Prisma.QueryMode.insensitive } }
+    const includeTotal =
+      query.includeTotal === 'true' || query.includeTotal === '1';
+    const where = {
+      businessId,
+      ...branchFilter,
+      ...(query.variantId ? { variantId: query.variantId } : {}),
+      ...(query.types?.length
+        ? { movementType: { in: query.types } }
+        : query.type
+          ? { movementType: query.type }
           : {}),
-        ...(from || to
-          ? {
-              createdAt: {
-                ...(from ? { gte: from } : {}),
-                ...(to ? { lte: to } : {}),
+      ...(query.actorId ? { createdById: query.actorId } : {}),
+      ...(reason
+        ? { reason: { contains: reason, mode: Prisma.QueryMode.insensitive } }
+        : {}),
+      ...(from || to
+        ? {
+            createdAt: {
+              ...(from ? { gte: from } : {}),
+              ...(to ? { lte: to } : {}),
+            },
+          }
+        : {}),
+      ...(search
+        ? {
+            OR: [
+              {
+                reason: {
+                  contains: search,
+                  mode: Prisma.QueryMode.insensitive,
+                },
               },
-            }
-          : {}),
-        ...(search
-          ? {
-              OR: [
-                {
-                  reason: {
+              {
+                variant: {
+                  name: {
                     contains: search,
                     mode: Prisma.QueryMode.insensitive,
                   },
                 },
-                {
-                  variant: {
-                    name: {
-                      contains: search,
-                      mode: Prisma.QueryMode.insensitive,
-                    },
-                  },
-                },
-              ],
-            }
-          : {}),
-      },
-      include: {
-        branch: true,
-        variant: {
-          include: {
-            baseUnit: true,
-            sellUnit: true,
-            product: { select: { name: true } },
+              },
+            ],
+          }
+        : {}),
+    };
+    const [items, total] = await Promise.all([
+      this.prisma.stockMovement.findMany({
+        where,
+        include: {
+          branch: true,
+          variant: {
+            include: {
+              baseUnit: true,
+              sellUnit: true,
+              product: { select: { name: true } },
+            },
+          },
+          createdBy: { select: { id: true, name: true, email: true } },
+          batch: true,
+          approval: {
+            select: {
+              id: true,
+              status: true,
+              approvedByUserId: true,
+              approvedBy: { select: { name: true } },
+              decidedAt: true,
+            },
           },
         },
-        createdBy: { select: { id: true, name: true, email: true } },
-        batch: true,
-      },
-      orderBy: { createdAt: 'desc' },
-      ...pagination,
-    });
-    return buildPaginatedResponse(items, pagination.take);
+        orderBy: { createdAt: 'desc' },
+        ...pagination,
+      }),
+      includeTotal
+        ? this.prisma.stockMovement.count({ where })
+        : Promise.resolve(undefined),
+    ]);
+    return buildPaginatedResponse(items, pagination.take, total);
   }
 
   async listBatches(
@@ -519,12 +575,22 @@ export class StockService {
     let gainEntryId: string | null = null;
     let beforeSnapshot: { id: string; quantity: Prisma.Decimal } | null = null;
 
+    // Reasons that represent actual financial losses (stock gone, no value recovered)
+    const LOSS_REASONS: LossReason[] = [
+      LossReason.DAMAGED, LossReason.LOST, LossReason.STOLEN,
+      LossReason.EXPIRED, LossReason.SHRINKAGE, LossReason.OTHER,
+    ];
+    // Reasons that represent stock that was purchased (cost should be recorded)
+    const PURCHASE_REASONS: GainReason[] = [
+      GainReason.UNRECORDED_PURCHASE, GainReason.INITIAL_STOCK,
+    ];
+
+    const isActualLoss = data.type === 'NEGATIVE' && data.lossReason && LOSS_REASONS.includes(data.lossReason);
+    const isPurchaseCost = data.type === 'POSITIVE' && data.gainReason && PURCHASE_REASONS.includes(data.gainReason);
+
     // Pre-compute unit cost before opening the transaction (read-only operation)
     let resolvedUnitCost: Prisma.Decimal | null = null;
-    if (
-      (data.type === 'NEGATIVE' && data.lossReason) ||
-      (data.type === 'POSITIVE' && data.gainReason)
-    ) {
+    if (isActualLoss || isPurchaseCost) {
       resolvedUnitCost =
         (await this.resolveUnitCost(
           businessId,
@@ -561,11 +627,17 @@ export class StockService {
             movementType,
             reason: data.reason,
             batchId: data.batchId ?? null,
+            approvalId: options?.approvalId ?? null,
           },
         });
 
+        // Financial records based on reason:
+        // - Actual losses (DAMAGED, STOLEN, etc.) → LossEntry (reduces profit)
+        // - SOLD_OUTSIDE_POS / CORRECTION → no financial record
+        // - UNRECORDED_PURCHASE / INITIAL_STOCK → Expense with STOCK_COST (reduces profit)
+        // - FOUND_STOCK / RETURN_NOT_LOGGED / CORRECTION / OTHER → no financial record
         let txLossEntryId: string | null = null;
-        if (data.type === 'NEGATIVE' && data.lossReason && resolvedUnitCost) {
+        if (isActualLoss && resolvedUnitCost) {
           const totalCost = resolvedUnitCost.mul(quantity);
           const lossEntry = await tx.lossEntry.create({
             data: {
@@ -576,31 +648,37 @@ export class StockService {
               quantity,
               unitCost: resolvedUnitCost,
               totalCost,
-              reason: data.lossReason,
+              reason: data.lossReason!,
               note: data.reason ?? null,
             },
           });
           txLossEntryId = lossEntry.id;
         }
 
-        let txGainEntryId: string | null = null;
-        if (data.type === 'POSITIVE' && data.gainReason && resolvedUnitCost) {
+        let txExpenseId: string | null = null;
+        if (isPurchaseCost && resolvedUnitCost) {
           const totalCost = resolvedUnitCost.mul(quantity);
-          const gainEntry = await tx.gainEntry.create({
+          const settings = await tx.businessSettings.findFirst({
+            where: { businessId },
+            select: { localeSettings: true },
+          });
+          const locale = (settings?.localeSettings as Record<string, unknown> | null) ?? {};
+          const currency = String(locale.currency ?? 'TZS');
+          const expense = await tx.expense.create({
             data: {
               businessId,
               branchId: data.branchId,
-              variantId: data.variantId,
-              stockMovementId: txMovement.id,
-              quantity,
-              unitCost: resolvedUnitCost,
-              totalCost,
-              reason: data.gainReason,
-              note: data.reason ?? null,
+              category: 'STOCK_COST',
+              amount: totalCost,
+              currency,
+              note: `${data.gainReason}: ${variant.product?.name ?? ''} – ${variant.name} (x${quantity})`,
+              createdBy: userId,
             },
           });
-          txGainEntryId = gainEntry.id;
+          txExpenseId = expense.id;
         }
+
+        const txGainEntryId: string | null = null;
 
         const txSnapshot = await tx.stockSnapshot.upsert({
           where: {
@@ -624,7 +702,7 @@ export class StockService {
           },
         });
 
-        return { txMovement, txLossEntryId, txGainEntryId, txSnapshot, txBeforeSnapshot };
+        return { txMovement, txLossEntryId, txGainEntryId, txExpenseId, txSnapshot, txBeforeSnapshot };
       });
 
       movement = txResult.txMovement;
@@ -670,6 +748,7 @@ export class StockService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: data.branchId,
       action: 'STOCK_ADJUST',
       resourceType: 'StockMovement',
       resourceId: movement.id,
@@ -689,6 +768,7 @@ export class StockService {
       await this.auditService.logEvent({
         businessId,
         userId,
+        branchId: data.branchId,
         action: 'STOCK_SNAPSHOT_UPDATE',
         resourceType: 'StockSnapshot',
         resourceId: afterSnapshot.id,
@@ -741,6 +821,8 @@ export class StockService {
       unitId?: string;
       expectedQuantity?: number;
       reason?: string;
+      shortageReason?: string;
+      surplusReason?: string;
       batchId?: string;
       idempotencyKey?: string;
     },
@@ -925,11 +1007,27 @@ export class StockService {
             movementType,
             reason: data.reason,
             batchId: data.batchId ?? null,
+            approvalId: options?.approvalId ?? null,
           },
         });
 
+        // Financial logic based on variance reason:
+        // Shortages: DAMAGED/LOST/STOLEN/EXPIRED/SHRINKAGE/OTHER → loss (reduces profit)
+        //            SOLD_OUTSIDE_POS/CORRECTION → no financial impact
+        // Surpluses: UNRECORDED_PURCHASE → expense (stock cost, reduces profit)
+        //            FOUND_STOCK/RETURN_NOT_LOGGED/CORRECTION/OTHER → no financial impact
+        const SHORTAGE_LOSS_REASONS = ['DAMAGED', 'LOST', 'STOLEN', 'EXPIRED', 'SHRINKAGE', 'OTHER'];
+        const SURPLUS_COST_REASONS = ['UNRECORDED_PURCHASE'];
+
+        const isShortage = variance < 0;
+        const shortageReason = isShortage ? (data.shortageReason ?? 'OTHER') : null;
+        const surplusReason = !isShortage && variance > 0 ? (data.surplusReason ?? 'OTHER') : null;
+        const isFinancialLoss = isShortage && shortageReason && SHORTAGE_LOSS_REASONS.includes(shortageReason);
+        const isStockCost = !isShortage && surplusReason && SURPLUS_COST_REASONS.includes(surplusReason);
+
         let txVarianceCostId: string | null = null;
-        if (variance !== 0 && varianceUnitCost) {
+        if (variance !== 0 && varianceUnitCost && isFinancialLoss) {
+          // Shortage with loss reason → create variance cost (reduces profit via P&L)
           const absQuantity = new Prisma.Decimal(Math.abs(variance));
           const totalCost = varianceUnitCost.mul(absQuantity);
           const varianceCost = await tx.stockCountVarianceCost.create({
@@ -941,11 +1039,36 @@ export class StockService {
               quantity: absQuantity,
               unitCost: varianceUnitCost,
               totalCost,
-              varianceType: variance < 0 ? VarianceType.SHORTAGE : VarianceType.SURPLUS,
+              varianceType: VarianceType.SHORTAGE,
+              shortageReason: shortageReason as never,
               reason: data.reason ?? null,
             },
           });
           txVarianceCostId = varianceCost.id;
+        }
+
+        if (variance > 0 && varianceUnitCost && isStockCost) {
+          // Surplus with purchase reason → create expense (stock cost)
+          const absQuantity = new Prisma.Decimal(Math.abs(variance));
+          const totalCost = varianceUnitCost.mul(absQuantity);
+          const settings = await tx.businessSettings.findFirst({
+            where: { businessId },
+            select: { localeSettings: true },
+          });
+          const locale = (settings?.localeSettings as Record<string, unknown> | null) ?? {};
+          const currency = String(locale.currency ?? 'TZS');
+          await tx.expense.create({
+            data: {
+              businessId,
+              branchId: data.branchId,
+              referenceNumber: await generateReferenceNumber(tx, 'expense', businessId),
+              category: 'STOCK_COST',
+              amount: totalCost,
+              currency,
+              note: `Stock count surplus — unrecorded purchase: ${variant.product?.name ?? ''} – ${variant.name} (x${absQuantity})`,
+              createdBy: userId,
+            },
+          });
         }
 
         const txSnapshot = await tx.stockSnapshot.upsert({
@@ -998,6 +1121,7 @@ export class StockService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: data.branchId,
       action: 'STOCK_COUNT',
       resourceType: 'StockMovement',
       resourceId: movement.id,
@@ -1014,6 +1138,7 @@ export class StockService {
       await this.auditService.logEvent({
         businessId,
         userId,
+        branchId: data.branchId,
         action: 'STOCK_SNAPSHOT_UPDATE',
         resourceType: 'StockSnapshot',
         resourceId: afterSnapshot.id,
@@ -1053,13 +1178,39 @@ export class StockService {
     return movement;
   }
 
+  async generateBatchCode(businessId: string, branchId: string): Promise<string> {
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `BATCH-${dateStr}`;
+
+    const existing = await this.prisma.batch.findMany({
+      where: {
+        businessId,
+        branchId,
+        code: { startsWith: prefix },
+      },
+      select: { code: true },
+      orderBy: { code: 'desc' },
+      take: 1,
+    });
+
+    let sequence = 1;
+    if (existing.length > 0) {
+      const lastCode = existing[0].code;
+      const lastSeq = parseInt(lastCode.split('-').pop() || '0', 10);
+      sequence = lastSeq + 1;
+    }
+
+    return `${prefix}-${String(sequence).padStart(3, '0')}`;
+  }
+
   async createBatch(
     businessId: string,
     userId: string,
     data: {
       branchId: string;
       variantId: string;
-      code: string;
+      code?: string;
       expiryDate?: string;
     },
   ) {
@@ -1080,12 +1231,14 @@ export class StockService {
       throw new BadRequestException('Batch tracking is disabled.');
     }
 
+    const code = data.code?.trim() || await this.generateBatchCode(businessId, data.branchId);
+
     const batch = await this.prisma.batch.create({
       data: {
         businessId,
         branchId: data.branchId,
         variantId: data.variantId,
-        code: data.code,
+        code,
         expiryDate: data.expiryDate ? new Date(data.expiryDate) : null,
         unitCost:
           variant.defaultCost !== null && variant.defaultCost !== undefined
@@ -1097,6 +1250,7 @@ export class StockService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: data.branchId,
       action: 'BATCH_CREATE',
       resourceType: 'Batch',
       resourceId: batch.id,
@@ -1176,6 +1330,7 @@ export class StockService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: data.branchId,
       action: 'REORDER_POINT_UPSERT',
       resourceType: 'ReorderPoint',
       resourceId: record.id,

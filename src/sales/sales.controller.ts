@@ -35,6 +35,7 @@ export class SalesController {
       cashierId?: string;
       customerId?: string;
       cartDiscount?: number;
+      notes?: string;
       isOffline?: boolean;
       offlineDeviceId?: string;
       lines: {

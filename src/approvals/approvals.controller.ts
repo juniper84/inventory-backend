@@ -104,6 +104,33 @@ export class ApprovalsController {
     );
   }
 
+  @Post('approvals/bulk-approve')
+  @Permissions(PermissionsList.APPROVALS_WRITE)
+  bulkApprove(
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Body() body: { approvalIds: string[] },
+  ) {
+    return this.approvalsService.bulkApprove(
+      requireBusinessId(req),
+      body.approvalIds ?? [],
+      requireUserId(req),
+    );
+  }
+
+  @Post('approvals/bulk-reject')
+  @Permissions(PermissionsList.APPROVALS_WRITE)
+  bulkReject(
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Body() body: { approvalIds: string[]; reason?: string },
+  ) {
+    return this.approvalsService.bulkReject(
+      requireBusinessId(req),
+      body.approvalIds ?? [],
+      requireUserId(req),
+      body.reason,
+    );
+  }
+
   @Post('approvals/:id/approve')
   @Permissions(PermissionsList.APPROVALS_WRITE)
   approve(
@@ -114,6 +141,21 @@ export class ApprovalsController {
       requireBusinessId(req),
       id,
       requireUserId(req),
+    );
+  }
+
+  @Post('approvals/:id/delegate')
+  @Permissions(PermissionsList.APPROVALS_WRITE)
+  delegate(
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Param('id') id: string,
+    @Body() body: { userId: string },
+  ) {
+    return this.approvalsService.delegate(
+      requireBusinessId(req),
+      id,
+      requireUserId(req),
+      body.userId,
     );
   }
 

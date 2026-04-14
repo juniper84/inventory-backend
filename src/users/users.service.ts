@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import crypto from 'crypto';
 import { AuditService } from '../audit/audit.service';
@@ -98,6 +98,12 @@ export class UsersService {
             mustResetPassword: true,
             createdAt: true,
             updatedAt: true,
+            roles: {
+              select: {
+                role: { select: { id: true, name: true, approvalTier: true } },
+              },
+              where: { role: { businessId } },
+            },
           },
         },
       },
@@ -115,10 +121,25 @@ export class UsersService {
             mustResetPassword: true;
             createdAt: true;
             updatedAt: true;
+            roles: {
+              select: {
+                role: { select: { id: true; name: true; approvalTier: true } };
+              };
+            };
           };
         };
       };
     }>[];
+    // Enrich with online status (has active, non-expired refresh token)
+    const userIds = memberships.map((m) => m.user.id);
+    const activeTokens = userIds.length
+      ? await this.prisma.refreshToken.findMany({
+          where: { userId: { in: userIds }, revokedAt: null, expiresAt: { gt: new Date() } },
+          select: { userId: true },
+        })
+      : [];
+    const onlineSet = new Set(activeTokens.map((t) => t.userId));
+
     const items = memberships.map((membership) => ({
       id: membership.user.id,
       name: membership.user.name,
@@ -131,8 +152,14 @@ export class UsersService {
         > | null) ?? null,
       status: membership.status,
       mustResetPassword: membership.user.mustResetPassword,
+      isOnline: onlineSet.has(membership.user.id),
       createdAt: membership.user.createdAt,
       updatedAt: membership.user.updatedAt,
+      roles: membership.user.roles.map((ur) => ({
+        id: ur.role.id,
+        name: ur.role.name,
+        approvalTier: ur.role.approvalTier,
+      })),
     }));
     return buildPaginatedResponse(items, pagination.take);
   }
@@ -154,56 +181,104 @@ export class UsersService {
       data.tempPassword ?? crypto.randomBytes(12).toString('hex'),
     );
 
-    const { user, membership } = await this.prisma.$transaction(async (tx) => {
-      await this.subscriptionService.assertLimit(businessId, 'users', 1, tx);
-
-      let user = await tx.user.findFirst({ where: { email: data.email } });
-      if (!user) {
-        user = await tx.user.create({
-          data: {
-            name: data.name,
-            email: data.email,
-            phone: data.phone ?? null,
-            passwordHash,
-            mustResetPassword: data.mustResetPassword ?? true,
-            status: data.status as any,
-          },
-        });
-      }
-
-      const membership = await tx.businessUser.upsert({
-        where: { businessId_userId: { businessId, userId: user.id } },
-        create: {
-          businessId,
-          userId: user.id,
-          status: (data.status as any) ?? 'ACTIVE',
-        },
-        update: {
-          status: (data.status as any) ?? 'ACTIVE',
-        },
-      });
-
-      return { user, membership };
+    const result = await this.prisma.$transaction(async (tx) => {
+      return this.createWithTx(tx, businessId, data, passwordHash);
     });
 
     this.auditService.logEvent({
       businessId,
       userId: actorId,
-      action: 'USER_CREATE',
+      action: result.isExistingUser ? 'USER_LINK_BUSINESS' : 'USER_CREATE',
       resourceType: 'User',
-      resourceId: user.id,
+      resourceId: result.user.id,
       outcome: 'SUCCESS',
       metadata: data,
     });
     return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone ?? null,
-      status: membership.status,
-      mustResetPassword: user.mustResetPassword,
-      createdAt: user.createdAt,
+      id: result.user.id,
+      name: result.user.name,
+      email: result.user.email,
+      phone: result.user.phone ?? null,
+      status: result.membership.status,
+      mustResetPassword: result.user.mustResetPassword,
+      createdAt: result.user.createdAt,
+      isExistingUser: result.isExistingUser,
     };
+  }
+
+  /**
+   * Creates (or links) a user inside an existing transaction.
+   * If the user already exists and is verified, links them to the business
+   * (multi-business signup). Returns `isExistingUser: true` in that case.
+   */
+  async createWithTx(
+    tx: any,
+    businessId: string,
+    data: {
+      name: string;
+      email: string;
+      phone?: string | null;
+      status?: string;
+      tempPassword?: string;
+      mustResetPassword?: boolean;
+    },
+    precomputedPasswordHash?: string,
+  ) {
+    const passwordHash = precomputedPasswordHash ?? hashPassword(
+      data.tempPassword ?? crypto.randomBytes(12).toString('hex'),
+    );
+
+    await this.subscriptionService.assertLimit(businessId, 'users', 1, tx);
+
+    let user = await tx.user.findFirst({ where: { email: data.email } });
+
+    if (user && user.emailVerifiedAt) {
+      // User exists and is verified — this is a multi-business signup.
+      // Don't create a new user, just link them to the new business.
+      const membership = await tx.businessUser.upsert({
+        where: { businessId_userId: { businessId, userId: user.id } },
+        create: { businessId, userId: user.id, status: 'ACTIVE' },
+        update: { status: 'ACTIVE' },
+      });
+      return { user, membership, isExistingUser: true };
+    }
+
+    if (!user) {
+      user = await tx.user.create({
+        data: {
+          name: data.name,
+          email: data.email,
+          phone: data.phone ?? null,
+          passwordHash,
+          mustResetPassword: data.mustResetPassword ?? true,
+          status: data.status as any,
+        },
+      });
+    } else {
+      // User exists but email not verified — allow re-signup with updated info
+      user = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          name: data.name,
+          phone: data.phone ?? null,
+          passwordHash,
+        },
+      });
+    }
+
+    const membership = await tx.businessUser.upsert({
+      where: { businessId_userId: { businessId, userId: user.id } },
+      create: {
+        businessId,
+        userId: user.id,
+        status: (data.status as any) ?? 'ACTIVE',
+      },
+      update: {
+        status: (data.status as any) ?? 'ACTIVE',
+      },
+    });
+
+    return { user, membership, isExistingUser: false };
   }
 
   async update(
@@ -228,6 +303,15 @@ export class UsersService {
     const before = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!before) {
       return null;
+    }
+    if (actorId !== userId && data.status) {
+      const actorTier = await this.getUserMaxTier(actorId, businessId);
+      const targetTier = await this.getUserMaxTier(userId, businessId);
+      if (targetTier >= actorTier) {
+        throw new ForbiddenException(
+          'You can only change the status of users with a lower role than yours.',
+        );
+      }
     }
     const result = await this.prisma.$transaction(async (tx) => {
       const user = await tx.user.update({
@@ -273,6 +357,13 @@ export class UsersService {
     // Prevent self-deactivation (Fix P3-G1-C5)
     if (actorId === userId) {
       throw new ForbiddenException('You cannot deactivate your own account.');
+    }
+    const actorTier = await this.getUserMaxTier(actorId, businessId);
+    const targetTier = await this.getUserMaxTier(userId, businessId);
+    if (targetTier >= actorTier) {
+      throw new ForbiddenException(
+        'You can only deactivate users with a lower role than yours.',
+      );
     }
     const membership = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.businessUser.update({
@@ -337,7 +428,7 @@ export class UsersService {
 
   async invite(
     businessId: string,
-    data: { email: string; roleId: string; createdById?: string },
+    data: { email: string; roleId: string; branchIds?: string[]; name?: string; phone?: string; createdById?: string },
   ) {
     await this.subscriptionService.assertLimit(businessId, 'users');
     const role = await this.prisma.role.findFirst({
@@ -364,6 +455,9 @@ export class UsersService {
         businessId,
         email: data.email,
         roleId: data.roleId,
+        branchIds: data.branchIds ?? [],
+        inviteeName: data.name ?? null,
+        inviteePhone: data.phone ?? null,
         tokenHash,
         expiresAt,
         createdById: data.createdById ?? null,
@@ -414,9 +508,20 @@ export class UsersService {
     return { id: invitation.id, email: invitation.email, businessId: invitation.businessId };
   }
 
+  async getInviteInfo(token: string) {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const invitation = await this.prisma.invitation.findFirst({
+      where: { tokenHash, acceptedAt: null },
+    });
+    if (!invitation || invitation.expiresAt < new Date()) {
+      throw new BadRequestException('Invitation token is invalid or has expired.');
+    }
+    return { email: invitation.email, businessId: invitation.businessId, name: invitation.inviteeName ?? null };
+  }
+
   async acceptInvite(data: { token: string; name: string; password: string; email?: string }) {
     if (!validatePassword(data.password)) {
-      return null;
+      throw new BadRequestException('Password does not meet requirements.');
     }
     const tokenHash = crypto
       .createHash('sha256')
@@ -427,12 +532,12 @@ export class UsersService {
     });
 
     if (!invitation || invitation.expiresAt < new Date()) {
-      return null;
+      throw new BadRequestException('Invitation token is invalid or has expired.');
     }
 
     // Verify the caller's email matches the invitation email (Fix P3-G1-C3)
     if (data.email && data.email.toLowerCase() !== invitation.email.toLowerCase()) {
-      return null;
+      throw new BadRequestException('Email does not match the invitation.');
     }
 
     // Pre-compute password hash outside the transaction (CPU-bound work)
@@ -449,14 +554,48 @@ export class UsersService {
       const existing = await tx.user.findFirst({
         where: { email: invitation.email },
       });
+
       if (existing) {
-        throw new ConflictException('A user with this email already exists.');
+        // User exists — link them to the new business instead of creating a new user
+        await tx.businessUser.upsert({
+          where: { businessId_userId: { businessId: invitation.businessId, userId: existing.id } },
+          create: { businessId: invitation.businessId, userId: existing.id, status: 'ACTIVE' },
+          update: { status: 'ACTIVE' },
+        });
+
+        // Create role assignments (branch-scoped or global)
+        if (invitation.branchIds.length > 0) {
+          for (const branchId of invitation.branchIds) {
+            await tx.userRole.create({
+              data: { userId: existing.id, roleId: invitation.roleId, branchId },
+            });
+          }
+        } else {
+          await tx.userRole.create({
+            data: { userId: existing.id, roleId: invitation.roleId },
+          });
+        }
+
+        await tx.invitation.update({
+          where: { id: invitation.id },
+          data: { acceptedAt: new Date() },
+        });
+
+        return {
+          id: existing.id,
+          name: existing.name,
+          email: existing.email,
+          status: existing.status,
+          mustResetPassword: existing.mustResetPassword,
+          createdAt: existing.createdAt,
+        };
       }
 
       const user = await tx.user.create({
         data: {
-          name: data.name,
+          name: invitation.inviteeName || data.name,
           email: invitation.email,
+          phone: invitation.inviteePhone || null,
           passwordHash,
           status: 'ACTIVE',
           emailVerifiedAt: new Date(),
@@ -479,12 +618,26 @@ export class UsersService {
         },
       });
 
-      await tx.userRole.create({
-        data: {
-          userId: user.id,
-          roleId: invitation.roleId,
-        },
-      });
+      if (invitation.branchIds.length > 0) {
+        // Create branch-scoped roles
+        for (const branchId of invitation.branchIds) {
+          await tx.userRole.create({
+            data: {
+              userId: user.id,
+              roleId: invitation.roleId,
+              branchId,
+            },
+          });
+        }
+      } else {
+        // Global role (existing behavior — no branch restriction)
+        await tx.userRole.create({
+          data: {
+            userId: user.id,
+            roleId: invitation.roleId,
+          },
+        });
+      }
 
       await tx.invitation.update({
         where: { id: invitation.id },
@@ -510,8 +663,9 @@ export class UsersService {
     return user;
   }
 
-  async assignRole(userId: string, roleId: string, branchId?: string | null) {
-    return this.prisma.userRole.create({
+  async assignRole(userId: string, roleId: string, branchId?: string | null, txClient?: any) {
+    const client = txClient || this.prisma;
+    return client.userRole.create({
       data: {
         userId,
         roleId,
@@ -526,7 +680,16 @@ export class UsersService {
         userId,
         role: { businessId },
       },
-      include: { role: true, branch: true },
+      include: {
+        role: {
+          include: {
+            rolePermissions: {
+              include: { permission: { select: { code: true } } },
+            },
+          },
+        },
+        branch: true,
+      },
     });
   }
 
@@ -559,7 +722,7 @@ export class UsersService {
     const roles = await this.prisma.userRole.findMany({
       where: { userId, role: { businessId } },
       select: {
-        role: { select: { id: true, name: true } },
+        role: { select: { id: true, name: true, approvalTier: true } },
         branch: { select: { id: true, name: true } },
       },
     });
@@ -571,6 +734,33 @@ export class UsersService {
         branch: entry.branch ?? null,
       })),
     };
+  }
+
+  async getUserActivity(businessId: string, userId: string) {
+    const [salesCount, lastAudit] = await Promise.all([
+      this.prisma.sale.count({
+        where: { businessId, cashierId: userId, status: 'COMPLETED' },
+      }),
+      this.prisma.auditLog.findFirst({
+        where: { businessId, userId },
+        orderBy: { createdAt: 'desc' },
+        select: { action: true, createdAt: true },
+      }),
+    ]);
+    return {
+      salesCount,
+      lastAction: lastAudit?.action ?? null,
+      lastActionAt: lastAudit?.createdAt ?? null,
+    };
+  }
+
+  async getLoginHistory(businessId: string, userId: string) {
+    return this.prisma.auditLog.findMany({
+      where: { businessId, userId, action: 'AUTH_LOGIN' },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: { createdAt: true, metadata: true },
+    });
   }
 
   async addUserRole(
@@ -654,6 +844,15 @@ export class UsersService {
     });
     if (!role) {
       return null;
+    }
+    if (role.name === 'System Owner') {
+      return null;
+    }
+    const actorTier = await this.getUserMaxTier(actorId, businessId);
+    if (role.approvalTier >= actorTier) {
+      throw new ForbiddenException(
+        'You can only remove roles below your own level.',
+      );
     }
     const branchValue = branchId ?? null;
     const deleted = await this.prisma.userRole.deleteMany({

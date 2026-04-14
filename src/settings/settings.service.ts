@@ -284,6 +284,15 @@ export class SettingsService {
     } as Prisma.InputJsonValue;
   }
 
+  async getSettingsHistory(businessId: string) {
+    return this.prisma.auditLog.findMany({
+      where: { businessId, action: { startsWith: 'SETTINGS' } },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: { action: true, userId: true, createdAt: true, metadata: true },
+    });
+  }
+
   async getSettings(businessId: string) {
     const settings = await this.prisma.businessSettings.findUnique({
       where: { businessId },
@@ -450,6 +459,18 @@ export class SettingsService {
         DEFAULT_APPROVAL_DEFAULTS) as Record<string, unknown>,
     ) as typeof DEFAULT_APPROVAL_DEFAULTS;
 
+    // Track which sections were updated
+    const now = new Date().toISOString();
+    const prevSectionUpdatedAt =
+      (existing.sectionUpdatedAt as Record<string, string> | null) ?? {};
+    const nextSectionUpdatedAt = { ...prevSectionUpdatedAt };
+    if (data.approvalDefaults) nextSectionUpdatedAt.approvalDefaults = now;
+    if (data.notificationDefaults) nextSectionUpdatedAt.notificationDefaults = now;
+    if (data.stockPolicies) nextSectionUpdatedAt.stockPolicies = now;
+    if (data.posPolicies) nextSectionUpdatedAt.posPolicies = now;
+    if (data.localeSettings) nextSectionUpdatedAt.localeSettings = now;
+    if (data.onboarding) nextSectionUpdatedAt.onboarding = now;
+
     const updated = await this.prisma.businessSettings.update({
       where: { businessId },
       data: {
@@ -468,6 +489,7 @@ export class SettingsService {
         onboardingCompletedAt: mergedOnboarding
           ? onboardingCompletedAt
           : undefined,
+        sectionUpdatedAt: nextSectionUpdatedAt as Prisma.InputJsonValue,
       },
     });
     await this.auditService.logEvent({

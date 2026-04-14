@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Post,
@@ -9,13 +10,17 @@ import {
   Req,
 } from '@nestjs/common';
 import { NotesService } from './notes.service';
+import { AuditService } from '../audit/audit.service';
 import { Permissions } from '../rbac/permissions.decorator';
 import { PermissionsList } from '../rbac/permissions';
 import { requireBusinessId, requireUserId } from '../common/request-context';
 
 @Controller()
 export class NotesController {
-  constructor(private readonly notesService: NotesService) {}
+  constructor(
+    private readonly notesService: NotesService,
+    private readonly auditService: AuditService,
+  ) {}
 
   @Get('notes')
   @Permissions(PermissionsList.NOTES_READ)
@@ -103,6 +108,102 @@ export class NotesController {
     );
   }
 
+  // ── Note Templates (must be before /:id) ────────────────────
+
+  @Get('notes/templates')
+  @Permissions(PermissionsList.NOTES_READ)
+  listTemplates(@Req() req: { user?: { businessId: string } }) {
+    return this.notesService.listTemplates(requireBusinessId(req));
+  }
+
+  @Post('notes/templates')
+  @Permissions(PermissionsList.NOTES_WRITE)
+  createTemplate(
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Body()
+    body: {
+      name: string;
+      title: string;
+      body?: string;
+      visibility?: string;
+      tags?: string[];
+    },
+  ) {
+    return this.notesService.createTemplate(
+      requireBusinessId(req),
+      requireUserId(req),
+      body,
+    );
+  }
+
+  @Delete('notes/templates/:id')
+  @Permissions(PermissionsList.NOTES_WRITE)
+  deleteTemplate(
+    @Req() req: { user?: { businessId: string } },
+    @Param('id') id: string,
+  ) {
+    return this.notesService.deleteTemplate(requireBusinessId(req), id);
+  }
+
+  // ── Note Sharing ───────────────────────────────────────────────
+
+  @Get('notes/:id/shares')
+  @Permissions(PermissionsList.NOTES_READ)
+  listShares(
+    @Req() req: { user?: { businessId: string } },
+    @Param('id') id: string,
+  ) {
+    return this.notesService.listNoteShares(requireBusinessId(req), id);
+  }
+
+  @Post('notes/:id/shares')
+  @Permissions(PermissionsList.NOTES_WRITE)
+  async shareNote(
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Param('id') id: string,
+    @Body() body: { userId: string },
+  ) {
+    const businessId = requireBusinessId(req);
+    const userId = requireUserId(req);
+    const result = await this.notesService.shareNote(businessId, id, userId, body.userId);
+    if (result) {
+      await this.auditService.logEvent({
+        businessId,
+        userId,
+        action: 'NOTE_SHARE',
+        resourceType: 'Note',
+        resourceId: id,
+        outcome: 'SUCCESS',
+        metadata: { targetUserId: body.userId },
+      });
+    }
+    return result;
+  }
+
+  @Delete('notes/:id/shares/:userId')
+  @Permissions(PermissionsList.NOTES_WRITE)
+  async unshareNote(
+    @Req() req: { user?: { businessId: string; sub?: string } },
+    @Param('id') id: string,
+    @Param('userId') targetUserId: string,
+  ) {
+    const businessId = requireBusinessId(req);
+    const userId = requireUserId(req);
+    const result = await this.notesService.unshareNote(businessId, id, targetUserId);
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      action: 'NOTE_UNSHARE',
+      resourceType: 'Note',
+      resourceId: id,
+      outcome: 'SUCCESS',
+      metadata: { targetUserId },
+    });
+    return result;
+  }
+
+  // ── Single Note ────────────────────────────────────────────────
+
   @Get('notes/:id')
   @Permissions(PermissionsList.NOTES_READ)
   getNote(
@@ -180,6 +281,7 @@ export class NotesController {
       visibility?: 'PRIVATE' | 'BRANCH' | 'BUSINESS';
       branchId?: string | null;
       status?: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
+      isPinned?: boolean;
       tags?: string[];
       links?: { resourceType: string; resourceId: string }[];
     },

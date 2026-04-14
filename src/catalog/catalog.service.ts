@@ -38,6 +38,9 @@ export class CatalogService {
           ? { name: { contains: search, mode: Prisma.QueryMode.insensitive } }
           : {}),
       },
+      include: {
+        _count: { select: { products: true } },
+      },
       orderBy: { createdAt: 'desc' },
       ...pagination,
     });
@@ -134,6 +137,28 @@ export class CatalogService {
     return result;
   }
 
+  async bulkUpdateCategoryStatus(
+    businessId: string,
+    userId: string,
+    categoryIds: string[],
+    status: string,
+  ) {
+    const result = await this.prisma.category.updateMany({
+      where: { id: { in: categoryIds }, businessId },
+      data: { status: status as any },
+    });
+    this.auditService.logEvent({
+      businessId,
+      userId,
+      action: 'CATEGORY_BULK_STATUS',
+      resourceType: 'Category',
+      resourceId: categoryIds.join(','),
+      outcome: 'SUCCESS',
+      metadata: { categoryIds, status, updatedCount: result.count },
+    });
+    return { updated: result.count };
+  }
+
   async listProducts(
     businessId: string,
     query: PaginationQuery & {
@@ -185,8 +210,52 @@ export class CatalogService {
         ? this.prisma.product.count({ where })
         : Promise.resolve(null),
     ]);
+    // Enrich with lastSoldAt per product
+    const productIds = items.map((p) => p.id);
+    const variantIds = items.flatMap((p) => p.variants.map((v) => v.id));
+    let lastSoldMap = new Map<string, Date>();
+    if (variantIds.length > 0) {
+      const lastSales = await this.prisma.saleLine.groupBy({
+        by: ['variantId'],
+        where: { variantId: { in: variantIds }, sale: { businessId, status: 'COMPLETED' } },
+        _max: { saleId: true },
+      });
+      if (lastSales.length > 0) {
+        const saleIds = lastSales.map((r) => r._max.saleId).filter((id): id is string => Boolean(id));
+        const sales = saleIds.length
+          ? await this.prisma.sale.findMany({
+              where: { id: { in: saleIds } },
+              select: { id: true, createdAt: true },
+            })
+          : [];
+        const saleDateMap = new Map(sales.map((s) => [s.id, s.createdAt]));
+        // Build variant → date map
+        const variantDateMap = new Map<string, Date>();
+        for (const row of lastSales) {
+          if (row._max.saleId) {
+            const date = saleDateMap.get(row._max.saleId);
+            if (date) variantDateMap.set(row.variantId, date);
+          }
+        }
+        // Aggregate to product level (latest variant sale date = product last sold)
+        for (const product of items) {
+          let latest: Date | null = null;
+          for (const variant of product.variants) {
+            const d = variantDateMap.get(variant.id);
+            if (d && (!latest || d > latest)) latest = d;
+          }
+          if (latest) lastSoldMap.set(product.id, latest);
+        }
+      }
+    }
+
+    const enriched = items.map((item) => ({
+      ...item,
+      lastSoldAt: lastSoldMap.get(item.id)?.toISOString() ?? null,
+    }));
+
     return buildPaginatedResponse(
-      items,
+      enriched,
       pagination.take,
       typeof total === 'number' ? total : undefined,
     );
@@ -392,15 +461,32 @@ export class CatalogService {
       );
     }
 
+    // Always enrich with total stock quantity across all branches
+    let totalStockMap = new Map<string, number>();
+    if (items.length > 0) {
+      const allSnapshots = await this.prisma.stockSnapshot.groupBy({
+        by: ['variantId'],
+        where: {
+          businessId,
+          variantId: { in: items.map((v) => v.id) },
+        },
+        _sum: { quantity: true },
+      });
+      for (const row of allSnapshots) {
+        totalStockMap.set(row.variantId, Number(row._sum.quantity ?? 0));
+      }
+    }
+
     const enriched = items.map((item) => ({
       ...item,
+      totalStock: totalStockMap.get(item.id) ?? 0,
       ...(stockMap !== null
         ? {
             hasStock: stockMap.has(item.id)
-              ? stockMap.get(item.id)!          // snapshot exists: true (qty>0) or false (qty=0)
+              ? stockMap.get(item.id)!
               : item.trackStock
-                ? false                         // tracked but no snapshot = never stocked = out of stock
-                : null,                         // untracked = ignore stock entirely, always show
+                ? false
+                : null,
           }
         : {}),
     }));

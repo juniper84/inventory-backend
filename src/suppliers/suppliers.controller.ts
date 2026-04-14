@@ -55,6 +55,18 @@ export class SuppliersController {
     return this.suppliersService.create(requireBusinessId(req), requireUserId(req), body);
   }
 
+  @Get(':id/performance')
+  @Permissions(PermissionsList.SUPPLIERS_READ)
+  getPerformance(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.suppliersService.getSupplierPerformance(
+      requireBusinessId(req),
+      id,
+    );
+  }
+
   @Put(':id')
   @Permissions(PermissionsList.SUPPLIERS_WRITE)
   update(

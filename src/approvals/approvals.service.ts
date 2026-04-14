@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Inject,
   forwardRef,
@@ -16,6 +17,7 @@ import {
   RecordStatus,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { generateReferenceNumber } from '../common/reference-number';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { DEFAULT_APPROVAL_DEFAULTS } from '../settings/defaults';
@@ -501,6 +503,7 @@ export class ApprovalsService {
 
     const approval = await this.prisma.approval.create({
       data: {
+        referenceNumber: await generateReferenceNumber(this.prisma, 'approval', request.businessId),
         businessId: request.businessId,
         actionType: request.actionType,
         status: canSelfApprove
@@ -736,6 +739,12 @@ export class ApprovalsService {
       allowSelfApprove?: boolean;
     },
   ) {
+    const callerTier = await this.getUserApprovalTier(userId, businessId);
+    if (callerTier < 3) {
+      throw new ForbiddenException(
+        'Only the System Owner can modify approval policies.',
+      );
+    }
     const existing = await this.prisma.approvalPolicy.findFirst({
       where: { id: policyId, businessId },
     });
@@ -1055,6 +1064,49 @@ export class ApprovalsService {
     return updated;
   }
 
+  async bulkApprove(
+    businessId: string,
+    approvalIds: string[],
+    userId: string,
+  ) {
+    const results: { id: string; success: boolean; error?: string }[] = [];
+    for (const id of approvalIds) {
+      try {
+        await this.approve(businessId, id, userId);
+        results.push({ id, success: true });
+      } catch (err) {
+        results.push({
+          id,
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed',
+        });
+      }
+    }
+    return results;
+  }
+
+  async bulkReject(
+    businessId: string,
+    approvalIds: string[],
+    userId: string,
+    reason?: string,
+  ) {
+    const results: { id: string; success: boolean; error?: string }[] = [];
+    for (const id of approvalIds) {
+      try {
+        await this.reject(businessId, id, userId, reason);
+        results.push({ id, success: true });
+      } catch (err) {
+        results.push({
+          id,
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed',
+        });
+      }
+    }
+    return results;
+  }
+
   async reject(
     businessId: string,
     approvalId: string,
@@ -1132,6 +1184,40 @@ export class ApprovalsService {
       branchId: approvalBranchId ?? undefined,
     });
 
+    return updated;
+  }
+
+  async delegate(
+    businessId: string,
+    approvalId: string,
+    userId: string,
+    delegateToUserId: string,
+  ) {
+    const approval = await this.prisma.approval.findFirst({
+      where: { id: approvalId, businessId, status: 'PENDING' },
+    });
+    if (!approval) {
+      throw new NotFoundException('Approval not found or not pending.');
+    }
+    const delegateUser = await this.prisma.businessUser.findFirst({
+      where: { businessId, userId: delegateToUserId, status: 'ACTIVE' },
+    });
+    if (!delegateUser) {
+      throw new BadRequestException('Delegate user not found in this business.');
+    }
+    const updated = await this.prisma.approval.update({
+      where: { id: approvalId },
+      data: { delegatedToUserId: delegateToUserId },
+    });
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      action: 'APPROVAL_DELEGATE',
+      resourceType: 'Approval',
+      resourceId: approvalId,
+      outcome: 'SUCCESS',
+      metadata: { delegatedToUserId: delegateToUserId },
+    });
     return updated;
   }
 }

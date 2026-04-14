@@ -80,6 +80,19 @@ export class PriceListsController {
     );
   }
 
+  @Post(':id/undo')
+  @Permissions(PermissionsList.PRICE_LISTS_MANAGE)
+  undoLastPriceChange(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string; sub?: string } },
+  ) {
+    return this.priceListsService.undoLastPriceChange(
+      requireBusinessId(req),
+      id,
+      requireUserId(req),
+    );
+  }
+
   @Post(':id/items/:itemId/remove')
   @Permissions(PermissionsList.PRICE_LISTS_MANAGE)
   removeItem(

@@ -20,6 +20,18 @@ export class RolesService {
     private readonly auditService: AuditService,
   ) {}
 
+  private async getActorMaxTier(userId: string, businessId: string): Promise<number> {
+    const userRoles = await this.prisma.userRole.findMany({
+      where: { userId, role: { businessId } },
+      select: { role: { select: { approvalTier: true } } },
+    });
+    let max = 0;
+    for (const ur of userRoles) {
+      max = Math.max(max, ur.role.approvalTier);
+    }
+    return max;
+  }
+
   private async enforceAdminPermissionRules(businessId: string) {
     const adminRole = await this.prisma.role.findFirst({
       where: { businessId, name: 'Admin' },
@@ -72,10 +84,18 @@ export class RolesService {
     };
     const items = await this.prisma.role.findMany({
       where,
+      include: {
+        _count: { select: { userRoles: true } },
+      },
       orderBy: { createdAt: 'desc' },
       ...pagination,
     });
-    return buildPaginatedResponse(items, pagination.take);
+    const enriched = items.map((item) => ({
+      ...item,
+      userCount: item._count.userRoles,
+      _count: undefined,
+    }));
+    return buildPaginatedResponse(enriched, pagination.take);
   }
 
   listPermissions() {
@@ -100,6 +120,12 @@ export class RolesService {
     data: { name: string; approvalTier?: number },
   ) {
     const tier = Math.min(Math.max(Math.floor(data.approvalTier ?? 0), 0), 2);
+    const actorTier = await this.getActorMaxTier(userId, businessId);
+    if (tier >= actorTier) {
+      throw new ForbiddenException(
+        'You can only create roles with a tier below your own level.',
+      );
+    }
     const result = await this.prisma.role.create({
       data: {
         businessId,
@@ -138,13 +164,20 @@ export class RolesService {
       if (before.isSystem) {
         throw new ForbiddenException('System roles cannot be renamed.');
       }
+      const actorTier = await this.getActorMaxTier(userId, businessId);
       const updateData: { name?: string; approvalTier?: number } = {};
       if (data.name !== undefined) updateData.name = data.name;
       if (data.approvalTier !== undefined) {
-        updateData.approvalTier = Math.min(
+        const newTier = Math.min(
           Math.max(Math.floor(data.approvalTier), 0),
           2,
         );
+        if (newTier >= actorTier) {
+          throw new ForbiddenException(
+            'You can only set a tier below your own level.',
+          );
+        }
+        updateData.approvalTier = newTier;
       }
       const updated = await tx.role.update({
         where: { id: roleId },
@@ -184,6 +217,12 @@ export class RolesService {
     }
     if (role.isSystem && role.name === 'System Owner') {
       throw new ForbiddenException('System Owner permissions are locked.');
+    }
+    const actorTier = await this.getActorMaxTier(userId, businessId);
+    if (role.approvalTier >= actorTier) {
+      throw new ForbiddenException(
+        'You can only modify permissions of roles below your own level.',
+      );
     }
 
     if (role.name === 'Admin') {

@@ -16,8 +16,10 @@ import { NotificationStreamService } from './notification-stream.service';
 import { Public } from '../auth/public.decorator';
 import { JwtPayload } from '../auth/auth.types';
 import { requireBusinessId, requireUserId } from '../common/request-context';
+import { SubscriptionBypass } from '../subscription/subscription.guard';
 
 @Controller('notifications')
+@SubscriptionBypass()
 export class NotificationsController {
   constructor(
     private readonly notificationsService: NotificationsService,
@@ -111,6 +113,13 @@ export class NotificationsController {
   @Get('announcement')
   getAnnouncement(@Req() req: { user?: { businessId: string } }) {
     return this.notificationsService.getActiveAnnouncement(
+      requireBusinessId(req),
+    );
+  }
+
+  @Get('announcements')
+  getAnnouncements(@Req() req: { user?: { businessId: string } }) {
+    return this.notificationsService.getActiveAnnouncements(
       requireBusinessId(req),
     );
   }

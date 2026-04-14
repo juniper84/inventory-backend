@@ -6,9 +6,11 @@ import { PermissionsList } from '../rbac/permissions';
 import { SupportChatService } from './support-chat.service';
 import { SupportChatContextService } from './support-chat-context.service';
 import { SupportChatPlaybookService } from './support-chat-playbook.service';
+import { SubscriptionBypass } from '../subscription/subscription.guard';
 
 @Controller('support/chat')
 @UseGuards(JwtAuthGuard)
+@SubscriptionBypass()
 export class SupportChatController {
   constructor(
     private readonly supportChatService: SupportChatService,

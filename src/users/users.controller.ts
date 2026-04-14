@@ -88,13 +88,34 @@ export class UsersController {
   @Permissions(PermissionsList.USERS_CREATE)
   invite(
     @Req() req: { user?: { businessId: string; sub?: string } },
-    @Body() body: { email: string; roleId: string },
+    @Body() body: { email: string; roleId: string; branchIds?: string[]; name?: string; phone?: string },
   ) {
     return this.usersService.invite(requireBusinessId(req), {
       email: body.email,
       roleId: body.roleId,
+      branchIds: body.branchIds,
+      name: body.name,
+      phone: body.phone,
       createdById: requireUserId(req),
     });
+  }
+
+  @Get(':id/activity')
+  @Permissions(PermissionsList.USERS_READ)
+  getUserActivity(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.usersService.getUserActivity(requireBusinessId(req), id);
+  }
+
+  @Get(':id/login-history')
+  @Permissions(PermissionsList.USERS_READ)
+  getLoginHistory(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.usersService.getLoginHistory(requireBusinessId(req), id);
   }
 
   @Get(':id/roles')

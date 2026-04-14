@@ -1,8 +1,9 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
 import { labelWithFallback } from '../common/labels';
+import { generateReferenceNumber } from '../common/reference-number';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -19,8 +20,21 @@ type ApprovalDefaults = {
   expense?: boolean;
 };
 
+const SYSTEM_CATEGORIES = [
+  { code: 'GENERAL', label: 'General' },
+  { code: 'TRANSFER_FEE', label: 'Transfer Fee' },
+  { code: 'SHIPPING', label: 'Shipping' },
+  { code: 'UTILITIES', label: 'Utilities' },
+  { code: 'RENT', label: 'Rent' },
+  { code: 'PAYROLL', label: 'Payroll' },
+  { code: 'STOCK_COST', label: 'Stock Cost' },
+  { code: 'OTHER', label: 'Other' },
+];
+
 @Injectable()
 export class ExpensesService {
+  private readonly logger = new Logger(ExpensesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly approvalsService: ApprovalsService,
@@ -79,7 +93,7 @@ export class ExpensesService {
     const where = {
       businessId,
       ...branchFilter,
-      ...(query.category ? { category: query.category as any } : {}),
+      ...(query.category ? { category: query.category } : {}),
       ...(status === 'transfer'
         ? { transferId: { not: null } }
         : status === 'direct'
@@ -153,6 +167,7 @@ export class ExpensesService {
     data: {
       branchId: string;
       category?: string;
+      title?: string;
       amount: number;
       currency?: string;
       expenseDate?: string;
@@ -196,9 +211,11 @@ export class ExpensesService {
       : new Date();
     const expense = await this.prisma.expense.create({
       data: {
+        referenceNumber: await generateReferenceNumber(this.prisma, 'expense', businessId),
         businessId,
         branchId: data.branchId,
-        category: (data.category ?? 'GENERAL') as any,
+        category: data.category ?? 'GENERAL',
+        title: data.title ?? null,
         amount: new Prisma.Decimal(data.amount),
         currency,
         expenseDate,
@@ -211,6 +228,7 @@ export class ExpensesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: data.branchId,
       action: 'EXPENSE_CREATE',
       resourceType: 'Expense',
       resourceId: expense.id,
@@ -237,6 +255,127 @@ export class ExpensesService {
 
     return expense;
   }
+
+  // ── Expense Category CRUD ──────────────────────────────────────────
+
+  async listCategories(businessId: string) {
+    await this.seedSystemCategories();
+    return this.prisma.expenseCategoryConfig.findMany({
+      where: {
+        OR: [{ businessId: null }, { businessId }],
+      },
+      orderBy: [{ isSystem: 'desc' }, { code: 'asc' }],
+    });
+  }
+
+  async createCategory(
+    businessId: string,
+    data: { code: string; label: string },
+  ) {
+    try {
+      return await this.prisma.expenseCategoryConfig.create({
+        data: {
+          businessId,
+          code: data.code,
+          label: data.label,
+          isSystem: false,
+        },
+      });
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        throw new ConflictException(
+          `Category code "${data.code}" already exists.`,
+        );
+      }
+      throw err;
+    }
+  }
+
+  async deleteCategory(businessId: string, id: string) {
+    const cat = await this.prisma.expenseCategoryConfig.findFirst({
+      where: { id, businessId },
+    });
+    if (!cat) {
+      throw new NotFoundException('Category not found.');
+    }
+    if (cat.isSystem) {
+      throw new BadRequestException('Cannot delete a system category.');
+    }
+    await this.prisma.expenseCategoryConfig.delete({ where: { id } });
+    return { deleted: true };
+  }
+
+  async updateCategory(
+    businessId: string,
+    id: string,
+    data: { label?: string; code?: string },
+  ) {
+    const cat = await this.prisma.expenseCategoryConfig.findFirst({
+      where: { id, businessId },
+    });
+    if (!cat) {
+      throw new NotFoundException('Category not found.');
+    }
+    if (cat.isSystem) {
+      throw new BadRequestException('System categories cannot be edited.');
+    }
+
+    const updateData: Record<string, unknown> = {};
+    if (data.label !== undefined) {
+      if (!data.label.trim()) {
+        throw new BadRequestException('Category label is required.');
+      }
+      updateData.label = data.label.trim();
+    }
+    if (data.code !== undefined) {
+      const code = data.code.trim().toUpperCase().replace(/\s+/g, '_');
+      if (!code) {
+        throw new BadRequestException('Category code is required.');
+      }
+      // Check for duplicate code
+      const existing = await this.prisma.expenseCategoryConfig.findFirst({
+        where: {
+          id: { not: id },
+          OR: [
+            { businessId, code },
+            { businessId: null, code },
+          ],
+        },
+      });
+      if (existing) {
+        throw new ConflictException(`Category code "${code}" already exists.`);
+      }
+      updateData.code = code;
+    }
+
+    if (!Object.keys(updateData).length) {
+      return cat;
+    }
+
+    return this.prisma.expenseCategoryConfig.update({
+      where: { id },
+      data: updateData,
+    });
+  }
+
+  private async seedSystemCategories() {
+    const count = await this.prisma.expenseCategoryConfig.count({
+      where: { isSystem: true, businessId: null },
+    });
+    if (count > 0) return;
+
+    this.logger.log('Seeding system expense categories...');
+    await this.prisma.expenseCategoryConfig.createMany({
+      data: SYSTEM_CATEGORIES.map((c) => ({
+        ...c,
+        isSystem: true,
+        businessId: null,
+      })),
+      skipDuplicates: true,
+    });
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────
 
   private resolveBranchScope(branchScope: string[], branchId?: string) {
     if (!branchScope.length) {

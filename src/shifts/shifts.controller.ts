@@ -55,6 +55,18 @@ export class ShiftsController {
     );
   }
 
+  @Get(':id/performance')
+  @Permissions(PermissionsList.SHIFTS_OPEN)
+  getPerformance(
+    @Param('id') id: string,
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    return this.shiftsService.getShiftPerformance(
+      requireBusinessId(req),
+      id,
+    );
+  }
+
   @Post(':id/close')
   @Permissions(PermissionsList.SHIFTS_CLOSE)
   close(

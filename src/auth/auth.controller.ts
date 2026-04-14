@@ -10,18 +10,17 @@ import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { Public } from './public.decorator';
 import { UsersService } from '../users/users.service';
-import { BusinessService } from '../business/business.service';
 import { SubscriptionTier } from '@prisma/client';
 import { validatePassword } from './password';
 import { buildRequestMetadata } from '../audit/audit.utils';
 import { requireUserId } from '../common/request-context';
+import { SubscriptionBypass } from '../subscription/subscription.guard';
 
 @Controller('auth')
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly usersService: UsersService,
-    private readonly businessService: BusinessService,
   ) {}
 
   @Post('login')
@@ -68,6 +67,7 @@ export class AuthController {
   }
 
   @Post('logout')
+  @SubscriptionBypass()
   async logout(
     @Req()
     req: {
@@ -102,12 +102,11 @@ export class AuthController {
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async confirmReset(
-    @Body() body: { userId?: string; token: string; password: string },
+    @Body() body: { token: string; password: string },
   ) {
     return this.authService.resetPassword(
       body.token,
       body.password,
-      body.userId,
     );
   }
 
@@ -135,35 +134,18 @@ export class AuthController {
     if (!validatePassword(body.password)) {
       throw new BadRequestException('Password does not meet requirements.');
     }
-    const { business, roles } = await this.businessService.createBusiness({
-      name: body.businessName,
-      tier: body.tier,
-      actorId: 'signup', // no human actor yet — user is created below
-    });
 
-    const owner = await this.usersService.create(business.id, 'signup', {
-      name: body.ownerName,
+    return await this.authService.signup({
+      businessName: body.businessName,
+      ownerName: body.ownerName,
       email: body.email,
-      status: 'PENDING',
-      tempPassword: body.password,
-      mustResetPassword: false,
+      password: body.password,
+      tier: body.tier,
     });
-
-    const systemOwnerRoleId = roles['System Owner'];
-    if (systemOwnerRoleId) {
-      await this.usersService.assignRole(owner.id, systemOwnerRoleId);
-    }
-
-    await this.authService.requestEmailVerification(owner.id, business.id);
-
-    return {
-      verificationRequired: true,
-      userId: owner.id,
-      businessId: business.id,
-    };
   }
 
   @Post('change-password')
+  @SubscriptionBypass()
   async changePassword(
     @Req() req: { user?: { sub?: string } },
     @Body() body: { currentPassword: string; newPassword: string },
@@ -177,6 +159,7 @@ export class AuthController {
   }
 
   @Post('switch-business')
+  @SubscriptionBypass()
   async switchBusiness(
     @Req()
     req: {
@@ -216,8 +199,16 @@ export class AuthController {
     return this.authService.listUserBusinesses(requireUserId(req));
   }
 
+  @Post('invite/info')
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  async inviteInfo(@Body() body: { token: string }) {
+    return this.usersService.getInviteInfo(body.token);
+  }
+
   @Post('invite/accept')
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async acceptInvite(
     @Body() body: { token: string; name: string; password: string },
   ) {
@@ -228,11 +219,11 @@ export class AuthController {
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async requestEmailVerification(
-    @Body() body: { email: string; businessId: string },
+    @Body() body: { email: string; businessId?: string },
   ) {
     return this.authService.requestEmailVerificationByEmail(
       body.email,
-      body.businessId,
+      body.businessId ?? '',
     );
   }
 

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, UnitType } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -68,6 +68,136 @@ export class UnitsService {
       after: created as unknown as Record<string, unknown>,
     });
     return created;
+  }
+
+  async updateUnit(
+    businessId: string,
+    unitId: string,
+    userId: string,
+    data: { label?: string; code?: string },
+  ) {
+    const unit = await this.prisma.unit.findFirst({
+      where: { id: unitId, businessId },
+    });
+    if (!unit) {
+      throw new NotFoundException('Unit not found.');
+    }
+    // System/global units (businessId = null) cannot be edited
+    if (!unit.businessId) {
+      throw new BadRequestException('System units cannot be edited.');
+    }
+
+    const updateData: Record<string, unknown> = {};
+    if (data.label !== undefined) {
+      if (!data.label.trim()) {
+        throw new BadRequestException('Unit label is required.');
+      }
+      updateData.label = data.label.trim();
+    }
+    if (data.code !== undefined) {
+      const code = data.code.trim().toLowerCase();
+      if (!code.match(/^[a-z0-9][a-z0-9-_]*$/)) {
+        throw new BadRequestException('Unit code must be alphanumeric.');
+      }
+      // Check for duplicate code (against both business and global units)
+      const existing = await this.prisma.unit.findFirst({
+        where: {
+          id: { not: unitId },
+          OR: [
+            { businessId, code },
+            { businessId: null, code },
+          ],
+        },
+      });
+      if (existing) {
+        throw new BadRequestException('Unit code already exists.');
+      }
+      updateData.code = code;
+    }
+
+    if (!Object.keys(updateData).length) {
+      return unit;
+    }
+
+    const before = { ...unit } as unknown as Record<string, unknown>;
+    const updated = await this.prisma.unit.update({
+      where: { id: unitId },
+      data: updateData,
+    });
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      action: 'UNIT_UPDATE',
+      resourceType: 'Unit',
+      resourceId: unitId,
+      outcome: 'SUCCESS',
+      metadata: {
+        code: updated.code,
+        label: updated.label,
+        unitType: updated.unitType,
+      },
+      before,
+      after: updated as unknown as Record<string, unknown>,
+    });
+    return updated;
+  }
+
+  async deleteUnit(businessId: string, unitId: string, userId: string) {
+    const unit = await this.prisma.unit.findFirst({
+      where: { id: unitId, businessId },
+    });
+    if (!unit) {
+      throw new NotFoundException('Unit not found.');
+    }
+    // System/global units (businessId = null) cannot be deleted
+    if (!unit.businessId) {
+      throw new BadRequestException('System units cannot be deleted.');
+    }
+
+    // Check all tables that reference this unit
+    const [baseVariants, sellVariants, saleLines, purchaseLines, poLines, receivingLines, stockMovements, returnLines] = await Promise.all([
+      this.prisma.variant.count({ where: { baseUnitId: unitId } }),
+      this.prisma.variant.count({ where: { sellUnitId: unitId } }),
+      this.prisma.saleLine.count({ where: { unitId } }),
+      this.prisma.purchaseLine.count({ where: { unitId } }),
+      this.prisma.purchaseOrderLine.count({ where: { unitId } }),
+      this.prisma.receivingLine.count({ where: { unitId } }),
+      this.prisma.stockMovement.count({ where: { unitId } }),
+      this.prisma.supplierReturnLine.count({ where: { unitId } }),
+    ]);
+
+    const totalReferences = baseVariants + sellVariants + saleLines + purchaseLines + poLines + receivingLines + stockMovements + returnLines;
+    if (totalReferences > 0) {
+      const details: string[] = [];
+      if (baseVariants > 0) details.push(`${baseVariants} variant(s) as base unit`);
+      if (sellVariants > 0) details.push(`${sellVariants} variant(s) as sell unit`);
+      if (saleLines > 0) details.push(`${saleLines} sale line(s)`);
+      if (purchaseLines > 0) details.push(`${purchaseLines} purchase line(s)`);
+      if (poLines > 0) details.push(`${poLines} purchase order line(s)`);
+      if (receivingLines > 0) details.push(`${receivingLines} receiving line(s)`);
+      if (stockMovements > 0) details.push(`${stockMovements} stock movement(s)`);
+      if (returnLines > 0) details.push(`${returnLines} supplier return line(s)`);
+      throw new BadRequestException(
+        `Cannot delete this unit — it is referenced by ${details.join(', ')}.`,
+      );
+    }
+
+    await this.prisma.unit.delete({ where: { id: unitId } });
+    await this.auditService.logEvent({
+      businessId,
+      userId,
+      action: 'UNIT_DELETE',
+      resourceType: 'Unit',
+      resourceId: unitId,
+      outcome: 'SUCCESS',
+      metadata: {
+        code: unit.code,
+        label: unit.label,
+        unitType: unit.unitType,
+      },
+      before: unit as unknown as Record<string, unknown>,
+    });
+    return { deleted: true };
   }
 
   async resolveDefaultUnitId(businessId: string) {

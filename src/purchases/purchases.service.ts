@@ -18,6 +18,7 @@ import {
   finalizeIdempotency,
 } from '../common/idempotency';
 import { labelWithFallback } from '../common/labels';
+import { generateReferenceNumber } from '../common/reference-number';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SubscriptionService } from '../subscription/subscription.service';
@@ -39,6 +40,24 @@ export class PurchasesService {
     private readonly subscriptionService: SubscriptionService,
     private readonly unitsService: UnitsService,
   ) {}
+
+  private async generateBatchCode(businessId: string, branchId: string): Promise<string> {
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `BATCH-${dateStr}`;
+    const existing = await this.prisma.batch.findMany({
+      where: { businessId, branchId, code: { startsWith: prefix } },
+      select: { code: true },
+      orderBy: { code: 'desc' },
+      take: 1,
+    });
+    let sequence = 1;
+    if (existing.length > 0) {
+      const lastSeq = parseInt(existing[0].code.split('-').pop() || '0', 10);
+      sequence = lastSeq + 1;
+    }
+    return `${prefix}-${String(sequence).padStart(3, '0')}`;
+  }
 
   private async getStockPolicies(businessId: string) {
     const settings = await this.prisma.businessSettings.findUnique({
@@ -468,6 +487,34 @@ export class PurchasesService {
       .then((items) => buildPaginatedResponse(items, pagination.take));
   }
 
+  async getSupplierReturnRates(businessId: string) {
+    const [returns, purchases] = await Promise.all([
+      this.prisma.supplierReturn.groupBy({
+        by: ['supplierId'],
+        where: { businessId },
+        _count: { id: true },
+      }),
+      this.prisma.purchase.groupBy({
+        by: ['supplierId'],
+        where: { businessId },
+        _count: { id: true },
+      }),
+    ]);
+    const purchaseMap = new Map(
+      purchases.map((p) => [p.supplierId, p._count.id]),
+    );
+    return returns.map((r) => {
+      const purchaseCount = purchaseMap.get(r.supplierId) ?? 0;
+      return {
+        supplierId: r.supplierId,
+        returnCount: r._count.id,
+        purchaseCount,
+        returnRate:
+          purchaseCount > 0 ? r._count.id / purchaseCount : 0,
+      };
+    });
+  }
+
   private resolveBranchScope(branchScope: string[], branchId?: string) {
     if (!branchScope.length) {
       return branchId ? { branchId } : {};
@@ -581,6 +628,7 @@ export class PurchasesService {
     try {
       purchase = await this.prisma.purchase.create({
         data: {
+          referenceNumber: await generateReferenceNumber(this.prisma, 'purchase', businessId),
           businessId,
           branchId: data.branchId,
           supplierId: data.supplierId,
@@ -616,6 +664,7 @@ export class PurchasesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: purchase.branchId,
       action: 'PURCHASE_CREATE',
       resourceType: 'Purchase',
       resourceId: purchase.id,
@@ -716,6 +765,7 @@ export class PurchasesService {
     try {
       purchase = await this.prisma.purchase.create({
         data: {
+          referenceNumber: await generateReferenceNumber(this.prisma, 'purchase', businessId),
           businessId,
           branchId: data.branchId,
           supplierId: data.supplierId,
@@ -751,6 +801,7 @@ export class PurchasesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: purchase.branchId,
       action: 'PURCHASE_DRAFT_CREATE',
       resourceType: 'Purchase',
       resourceId: purchase.id,
@@ -845,6 +896,7 @@ export class PurchasesService {
     try {
       po = await this.prisma.purchaseOrder.create({
         data: {
+          referenceNumber: await generateReferenceNumber(this.prisma, 'purchaseOrder', businessId),
           businessId,
           branchId: data.branchId,
           supplierId: data.supplierId,
@@ -879,6 +931,7 @@ export class PurchasesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: po.branchId,
       action: 'PURCHASE_ORDER_CREATE',
       resourceType: 'PurchaseOrder',
       resourceId: po.id,
@@ -1042,6 +1095,7 @@ export class PurchasesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: updated.branchId,
       action: 'PURCHASE_ORDER_UPDATE',
       resourceType: 'PurchaseOrder',
       resourceId: updated.id,
@@ -1101,6 +1155,7 @@ export class PurchasesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: updated.branchId,
       action: 'PURCHASE_ORDER_APPROVE',
       resourceType: 'PurchaseOrder',
       resourceId: updated.id,
@@ -1320,6 +1375,7 @@ export class PurchasesService {
                   batchAuditEvents.push({
                     businessId,
                     userId,
+                    branchId,
                     action: 'BATCH_UPDATE',
                     resourceType: 'Batch',
                     resourceId: updatedBatch.id,
@@ -1337,12 +1393,7 @@ export class PurchasesService {
                 return { ...line, batchId: batch.id };
               }
 
-              const code = line.batchCode?.trim();
-              if (!code) {
-                throw new BadRequestException(
-                  'Batch code is required for receiving.',
-                );
-              }
+              const code = line.batchCode?.trim() || await this.generateBatchCode(businessId, branchId);
               const existing = await tx.batch.findFirst({
                 where: {
                   businessId,
@@ -1367,6 +1418,7 @@ export class PurchasesService {
                   batchAuditEvents.push({
                     businessId,
                     userId,
+                    branchId,
                     action: 'BATCH_UPDATE',
                     resourceType: 'Batch',
                     resourceId: updatedBatch.id,
@@ -1398,6 +1450,7 @@ export class PurchasesService {
               batchAuditEvents.push({
                 businessId,
                 userId,
+                branchId,
                 action: 'BATCH_CREATE',
                 resourceType: 'Batch',
                 resourceId: createdBatch.id,
@@ -1445,6 +1498,8 @@ export class PurchasesService {
             movementAuditEvents.push({
               businessId,
               userId,
+              branchId:
+                purchaseBranch?.branchId ?? poBranch?.branchId ?? undefined,
               action: 'STOCK_MOVEMENT_CREATE',
               resourceType: 'StockMovement',
               resourceId: movement.id,
@@ -1492,6 +1547,7 @@ export class PurchasesService {
               snapshotAuditEvents.push({
                 businessId,
                 userId,
+                branchId: snapshotBranchId,
                 action: 'STOCK_SNAPSHOT_UPDATE',
                 resourceType: 'StockSnapshot',
                 resourceId: afterSnapshot.id,
@@ -1597,9 +1653,12 @@ export class PurchasesService {
       });
     }
 
+    const receivingBranchIdForAudit =
+      purchaseBranch?.branchId ?? poBranch?.branchId ?? undefined;
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: receivingBranchIdForAudit,
       action: 'RECEIVE_STOCK',
       resourceType: 'ReceivingLine',
       outcome: 'SUCCESS',
@@ -1672,6 +1731,7 @@ export class PurchasesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: purchase.branchId,
       action: 'PURCHASE_PAYMENT',
       resourceType: 'PurchasePayment',
       resourceId: payment.id,
@@ -1791,6 +1851,7 @@ export class PurchasesService {
         }
         const supplierReturn = await tx.supplierReturn.create({
           data: {
+            referenceNumber: await generateReferenceNumber(tx, 'supplierReturn', businessId),
             businessId,
             branchId: data.branchId,
             supplierId: data.supplierId,
@@ -1846,6 +1907,7 @@ export class PurchasesService {
           movementAuditEvents.push({
             businessId,
             userId,
+            branchId: data.branchId,
             action: 'STOCK_MOVEMENT_CREATE',
             resourceType: 'StockMovement',
             resourceId: movement.id,
@@ -1888,6 +1950,7 @@ export class PurchasesService {
           snapshotAuditEvents.push({
             businessId,
             userId,
+            branchId: data.branchId,
             action: 'STOCK_SNAPSHOT_UPDATE',
             resourceType: 'StockSnapshot',
             resourceId: afterSnapshot.id,
@@ -1913,6 +1976,7 @@ export class PurchasesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: data.branchId,
       action: 'SUPPLIER_RETURN',
       resourceType: 'SupplierReturn',
       resourceId: result.id,

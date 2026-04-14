@@ -57,7 +57,10 @@ async function fetchSnapshot(
     case 'Product':
       return prisma.product.findFirst({
         where: { id: resourceId, businessId: params.businessId },
-        select: { id: true, name: true, status: true, categoryId: true },
+        select: {
+          id: true, name: true, status: true, categoryId: true,
+          category: { select: { name: true } },
+        },
       });
     case 'Variant':
       return prisma.variant.findFirst({
@@ -68,6 +71,7 @@ async function fetchSnapshot(
           productId: true,
           sku: true,
           status: true,
+          product: { select: { name: true } },
         },
       });
     case 'Category':
@@ -121,6 +125,8 @@ async function fetchSnapshot(
           status: true,
           targetType: true,
           targetId: true,
+          requestedBy: { select: { name: true } },
+          approvedBy: { select: { name: true } },
         },
       });
     case 'ApprovalPolicy':
@@ -144,6 +150,10 @@ async function fetchSnapshot(
           quantity: true,
           reason: true,
           movementType: true,
+          unitId: true,
+          variant: { select: { name: true, product: { select: { name: true } } } },
+          branch: { select: { name: true } },
+          unit: { select: { code: true, label: true } },
         },
       });
     case 'Transfer':
@@ -151,30 +161,50 @@ async function fetchSnapshot(
         where: { id: resourceId, businessId: params.businessId },
         select: {
           id: true,
+          referenceNumber: true,
           status: true,
           sourceBranchId: true,
           destinationBranchId: true,
+          sourceBranch: { select: { name: true } },
+          destinationBranch: { select: { name: true } },
         },
       });
     case 'Purchase':
       return prisma.purchase.findFirst({
         where: { id: resourceId, businessId: params.businessId },
-        select: { id: true, status: true, supplierId: true, total: true },
+        select: {
+          id: true, referenceNumber: true, status: true, supplierId: true, total: true, branchId: true,
+          supplier: { select: { name: true } },
+          branch: { select: { name: true } },
+        },
       });
     case 'PurchaseOrder':
       return prisma.purchaseOrder.findFirst({
         where: { id: resourceId, businessId: params.businessId },
-        select: { id: true, status: true, supplierId: true },
+        select: {
+          id: true, referenceNumber: true, status: true, supplierId: true, branchId: true,
+          supplier: { select: { name: true } },
+          branch: { select: { name: true } },
+        },
       });
     case 'Sale':
       return prisma.sale.findFirst({
         where: { id: resourceId, businessId: params.businessId },
-        select: { id: true, status: true, total: true, branchId: true },
+        select: {
+          id: true, referenceNumber: true, status: true, total: true, branchId: true, customerId: true,
+          branch: { select: { name: true } },
+          customer: { select: { name: true } },
+        },
       });
     case 'SaleRefund':
       return prisma.saleRefund.findFirst({
         where: { id: resourceId, businessId: params.businessId },
-        select: { id: true, status: true, total: true, saleId: true },
+        select: {
+          id: true, status: true, total: true, saleId: true, branchId: true, customerId: true,
+          branch: { select: { name: true } },
+          customer: { select: { name: true } },
+          sale: { select: { id: true, referenceNumber: true } },
+        },
       });
     case 'Expense':
       return prisma.expense.findFirst({
@@ -185,6 +215,7 @@ async function fetchSnapshot(
           amount: true,
           currency: true,
           branchId: true,
+          branch: { select: { name: true } },
         },
       });
     case 'Batch':
@@ -196,12 +227,17 @@ async function fetchSnapshot(
           variantId: true,
           branchId: true,
           expiryDate: true,
+          variant: { select: { name: true, product: { select: { name: true } } } },
+          branch: { select: { name: true } },
         },
       });
     case 'Barcode':
       return prisma.barcode.findFirst({
         where: { id: resourceId, businessId: params.businessId },
-        select: { id: true, code: true, variantId: true },
+        select: {
+          id: true, code: true, variantId: true,
+          variant: { select: { name: true, product: { select: { name: true } } } },
+        },
       });
     case 'PriceList':
       return prisma.priceList.findFirst({
@@ -211,17 +247,25 @@ async function fetchSnapshot(
     case 'PriceListItem':
       return prisma.priceListItem.findFirst({
         where: { id: resourceId, priceList: { businessId: params.businessId } },
-        select: { id: true, priceListId: true, variantId: true, price: true },
+        select: {
+          id: true, priceListId: true, variantId: true, price: true,
+          priceList: { select: { name: true } },
+          variant: { select: { name: true, product: { select: { name: true } } } },
+        },
       });
     case 'Shift':
       return prisma.shift.findFirst({
         where: { id: resourceId, businessId: params.businessId },
         select: {
           id: true,
+          referenceNumber: true,
           status: true,
           branchId: true,
           openedAt: true,
           closedAt: true,
+          branch: { select: { name: true } },
+          openedBy: { select: { name: true } },
+          closedBy: { select: { name: true } },
         },
       });
     case 'Subscription':
@@ -248,6 +292,9 @@ async function fetchSnapshot(
           supplierId: true,
           purchaseId: true,
           purchaseOrderId: true,
+          branchId: true,
+          supplier: { select: { name: true } },
+          branch: { select: { name: true } },
         },
       });
     case 'Attachment':
@@ -258,17 +305,29 @@ async function fetchSnapshot(
     case 'OfflineDevice':
       return prisma.offlineDevice.findFirst({
         where: { id: resourceId, businessId: params.businessId },
-        select: { id: true, deviceName: true, status: true, userId: true },
+        select: {
+          id: true, deviceName: true, status: true, userId: true,
+          user: { select: { name: true } },
+        },
       });
     case 'OfflineAction':
       return prisma.offlineAction.findFirst({
         where: { id: resourceId, businessId: params.businessId },
-        select: { id: true, actionType: true, status: true, deviceId: true },
+        select: {
+          id: true, actionType: true, status: true, deviceId: true,
+          device: { select: { deviceName: true } },
+          user: { select: { name: true } },
+        },
       });
     case 'ReceivingLine':
       return prisma.receivingLine.findFirst({
         where: { id: resourceId, variant: { businessId: params.businessId } },
-        select: { id: true, quantity: true, variantId: true, purchaseId: true },
+        select: {
+          id: true, quantity: true, variantId: true, purchaseId: true, purchaseOrderId: true,
+          variant: { select: { name: true, product: { select: { name: true } } } },
+          purchase: { select: { referenceNumber: true } },
+          purchaseOrder: { select: { referenceNumber: true } },
+        },
       });
     case 'ReorderPoint':
       return prisma.reorderPoint.findFirst({
@@ -279,6 +338,8 @@ async function fetchSnapshot(
           variantId: true,
           minQuantity: true,
           reorderQuantity: true,
+          branch: { select: { name: true } },
+          variant: { select: { name: true, product: { select: { name: true } } } },
         },
       });
     case 'Business':
@@ -294,7 +355,10 @@ async function fetchSnapshot(
     case 'Receipt':
       return prisma.receipt.findFirst({
         where: { id: resourceId },
-        select: { id: true, receiptNumber: true },
+        select: {
+          id: true, receiptNumber: true, saleId: true,
+          sale: { select: { branchId: true, branch: { select: { name: true } } } },
+        },
       });
     default:
       return null;

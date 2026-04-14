@@ -15,6 +15,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditEvent } from '../audit/audit.types';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { generateReferenceNumber } from '../common/reference-number';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { UnitsService } from '../units/units.service';
 import {
@@ -453,6 +454,7 @@ export class SalesService {
       cashierId?: string;
       customerId?: string;
       cartDiscount?: number;
+      notes?: string;
       isOffline?: boolean;
       offlineDeviceId?: string;
       lines: {
@@ -679,6 +681,7 @@ export class SalesService {
 
     const sale = await this.prisma.sale.create({
       data: {
+        referenceNumber: await generateReferenceNumber(this.prisma, 'sale', businessId),
         businessId,
         branchId: data.branchId,
         cashierId: data.cashierId ?? userId,
@@ -688,6 +691,7 @@ export class SalesService {
         customerPhoneSnapshot: customer?.phone ?? null,
         customerEmailSnapshot: customer?.email ?? null,
         customerTinSnapshot: customer?.tin ?? null,
+        notes: data.notes ?? null,
         status: SaleStatus.DRAFT,
         isOffline: data.isOffline ?? false,
         offlineDeviceId: data.offlineDeviceId ?? null,
@@ -742,6 +746,7 @@ export class SalesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: sale.branchId,
       action: 'SALE_DRAFT',
       resourceType: 'Sale',
       resourceId: sale.id,
@@ -1060,6 +1065,7 @@ export class SalesService {
               attemptMovementEvents.push({
                 businessId,
                 userId,
+                branchId: sale.branchId,
                 action: 'STOCK_MOVEMENT_CREATE',
                 resourceType: 'StockMovement',
                 resourceId: movement.id,
@@ -1077,6 +1083,7 @@ export class SalesService {
               attemptSnapshotEvents.push({
                 businessId,
                 userId,
+                branchId: sale.branchId,
                 action: 'STOCK_SNAPSHOT_UPDATE',
                 resourceType: 'StockSnapshot',
                 resourceId: snapshot.id,
@@ -1220,6 +1227,7 @@ export class SalesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: sale.branchId,
       action: 'SALE_COMPLETE',
       resourceType: 'Sale',
       resourceId: sale.id,
@@ -1280,6 +1288,7 @@ export class SalesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: sale.branchId,
       action: 'SALE_VOID',
       resourceType: 'Sale',
       resourceId: updated.id,
@@ -1499,6 +1508,7 @@ export class SalesService {
           refundStockAuditEvents.push({
             businessId,
             userId,
+            branchId: sale.branchId,
             action: 'STOCK_MOVEMENT_CREATE',
             resourceType: 'StockMovement',
             resourceId: movement.id,
@@ -1517,6 +1527,7 @@ export class SalesService {
           refundStockAuditEvents.push({
             businessId,
             userId,
+            branchId: sale.branchId,
             action: 'STOCK_SNAPSHOT_UPDATE',
             resourceType: 'StockSnapshot',
             resourceId: snapshot.id,
@@ -1547,6 +1558,7 @@ export class SalesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: sale.branchId,
       action: 'SALE_REFUND',
       resourceType: 'SaleRefund',
       resourceId: refund.id,
@@ -1620,6 +1632,7 @@ export class SalesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: sale.branchId,
       action: 'SALE_CREDIT_SETTLE',
       resourceType: 'SaleSettlement',
       resourceId: settlement.id,
@@ -1839,6 +1852,7 @@ export class SalesService {
       await this.auditService.logEvent({
         businessId,
         userId,
+        branchId: data.branchId,
         action: 'STOCK_MOVEMENT_CREATE',
         resourceType: 'StockMovement',
         resourceId: entry.movement.id,
@@ -1856,6 +1870,7 @@ export class SalesService {
       await this.auditService.logEvent({
         businessId,
         userId,
+        branchId: data.branchId,
         action: 'STOCK_SNAPSHOT_UPDATE',
         resourceType: 'StockSnapshot',
         resourceId: entry.snapshot.id,
@@ -1874,6 +1889,7 @@ export class SalesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: data.branchId,
       action: 'RETURN_WITHOUT_RECEIPT',
       resourceType: 'SaleRefund',
       resourceId: refund.id,
@@ -1997,6 +2013,7 @@ export class SalesService {
     await this.auditService.logEvent({
       businessId,
       userId,
+      branchId: receipt.sale.branchId,
       action: 'RECEIPT_REPRINT',
       resourceType: 'Receipt',
       resourceId: receiptId,

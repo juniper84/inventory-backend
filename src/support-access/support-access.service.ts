@@ -13,6 +13,7 @@ import {
 } from '../common/pagination';
 
 const DEFAULT_SUPPORT_ACCESS_HOURS = 4;
+const REQUIRED_SUPPORT_ACCESS_TIER = 3;
 
 @Injectable()
 export class SupportAccessService {
@@ -20,6 +21,18 @@ export class SupportAccessService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
   ) {}
+
+  private async getUserMaxTier(userId: string, businessId: string): Promise<number> {
+    const userRoles = await this.prisma.userRole.findMany({
+      where: { userId, role: { businessId } },
+      select: { role: { select: { approvalTier: true } } },
+    });
+    let max = 0;
+    for (const ur of userRoles) {
+      max = Math.max(max, ur.role.approvalTier);
+    }
+    return max;
+  }
 
   async createRequest(data: {
     businessId: string;
@@ -204,6 +217,64 @@ export class SupportAccessService {
     return revoked;
   }
 
+  async extendSession(data: {
+    sessionId: string;
+    platformAdminId: string;
+    additionalHours: number;
+    reason: string;
+  }) {
+    if (!data.reason?.trim()) {
+      throw new BadRequestException('Reason is required.');
+    }
+    if (
+      !Number.isFinite(data.additionalHours) ||
+      data.additionalHours <= 0 ||
+      data.additionalHours > 24
+    ) {
+      throw new BadRequestException(
+        'additionalHours must be between 1 and 24.',
+      );
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const session = await tx.supportAccessSession.findUnique({
+        where: { id: data.sessionId },
+      });
+      if (!session) {
+        throw new BadRequestException('Session not found.');
+      }
+      if (session.revokedAt) {
+        throw new BadRequestException('Session is revoked.');
+      }
+      if (session.expiresAt < new Date()) {
+        throw new BadRequestException('Session has already expired.');
+      }
+      const newExpiresAt = new Date(session.expiresAt);
+      newExpiresAt.setHours(
+        newExpiresAt.getHours() + data.additionalHours,
+      );
+      const updated = await tx.supportAccessSession.update({
+        where: { id: data.sessionId },
+        data: { expiresAt: newExpiresAt },
+      });
+      await this.auditService.logEvent({
+        businessId: session.businessId,
+        userId: data.platformAdminId,
+        action: 'SUPPORT_ACCESS_SESSION_EXTEND',
+        resourceType: 'SupportAccessSession',
+        resourceId: session.id,
+        outcome: 'SUCCESS',
+        reason: data.reason,
+        metadata: {
+          requestId: session.requestId,
+          previousExpiresAt: session.expiresAt.toISOString(),
+          newExpiresAt: newExpiresAt.toISOString(),
+          additionalHours: data.additionalHours,
+        },
+      });
+      return updated;
+    });
+  }
+
   listRequestsForBusiness(
     businessId: string,
     query: PaginationQuery & { status?: string } = {},
@@ -228,6 +299,12 @@ export class SupportAccessService {
     durationHours?: number;
     decisionNote?: string;
   }) {
+    const approverTier = await this.getUserMaxTier(data.approvedByUserId, data.businessId);
+    if (approverTier < REQUIRED_SUPPORT_ACCESS_TIER) {
+      throw new ForbiddenException(
+        'Only the System Owner can approve support access requests.',
+      );
+    }
     // Wrap status check + write in $transaction to prevent double-decision race (Fix P4-D-H10)
     const txResult = await this.prisma.$transaction(async (tx) => {
       const request = await tx.supportAccessRequest.findUnique({
@@ -280,6 +357,12 @@ export class SupportAccessService {
     approvedByUserId: string;
     decisionNote?: string;
   }) {
+    const rejecterTier = await this.getUserMaxTier(data.approvedByUserId, data.businessId);
+    if (rejecterTier < REQUIRED_SUPPORT_ACCESS_TIER) {
+      throw new ForbiddenException(
+        'Only the System Owner can reject support access requests.',
+      );
+    }
     // Wrap status check + write in $transaction to prevent double-decision race (Fix P4-D-H10)
     const txResult = await this.prisma.$transaction(async (tx) => {
       const request = await tx.supportAccessRequest.findUnique({

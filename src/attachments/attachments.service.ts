@@ -2,12 +2,14 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { createZip } from '../exports/zip';
 import {
   buildPaginatedResponse,
   parsePagination,
@@ -50,12 +52,13 @@ export class AttachmentsService {
     data: {
       purchaseId?: string;
       purchaseOrderId?: string;
+      supplierReturnId?: string;
       filename: string;
       mimeType?: string;
     },
     branchScope: string[] = [],
   ) {
-    if (!data.purchaseId && !data.purchaseOrderId) {
+    if (!data.purchaseId && !data.purchaseOrderId && !data.supplierReturnId) {
       return null;
     }
     await this.assertBranchScope(
@@ -63,6 +66,7 @@ export class AttachmentsService {
       data.purchaseId,
       data.purchaseOrderId,
       branchScope,
+      data.supplierReturnId,
     );
     this.ensureAttachmentConstraints({
       filename: data.filename,
@@ -80,6 +84,7 @@ export class AttachmentsService {
     data: PaginationQuery & {
       purchaseId?: string;
       purchaseOrderId?: string;
+      supplierReturnId?: string;
     } = {},
     branchScope: string[] = [],
   ) {
@@ -89,6 +94,7 @@ export class AttachmentsService {
       data.purchaseId,
       data.purchaseOrderId,
       branchScope,
+      data.supplierReturnId,
     );
     return this.prisma.attachment
       .findMany({
@@ -98,11 +104,17 @@ export class AttachmentsService {
           ...(scopedIds.purchaseOrderId
             ? { purchaseOrderId: scopedIds.purchaseOrderId }
             : {}),
+          ...(scopedIds.supplierReturnId
+            ? { supplierReturnId: scopedIds.supplierReturnId }
+            : {}),
           ...(scopedIds.purchaseIds
             ? { purchaseId: { in: scopedIds.purchaseIds } }
             : {}),
           ...(scopedIds.purchaseOrderIds
             ? { purchaseOrderId: { in: scopedIds.purchaseOrderIds } }
+            : {}),
+          ...(scopedIds.supplierReturnIds
+            ? { supplierReturnId: { in: scopedIds.supplierReturnIds } }
             : {}),
         },
         orderBy: { createdAt: 'desc' },
@@ -117,6 +129,7 @@ export class AttachmentsService {
     data: {
       purchaseId?: string;
       purchaseOrderId?: string;
+      supplierReturnId?: string;
       filename: string;
       storageKey?: string;
       url: string;
@@ -130,6 +143,7 @@ export class AttachmentsService {
       data.purchaseId,
       data.purchaseOrderId,
       branchScope,
+      data.supplierReturnId,
     );
     if (data.purchaseId) {
       const purchase = await this.prisma.purchase.findFirst({
@@ -144,6 +158,14 @@ export class AttachmentsService {
         where: { id: data.purchaseOrderId, businessId },
       });
       if (!po) {
+        return null;
+      }
+    }
+    if (data.supplierReturnId) {
+      const sr = await this.prisma.supplierReturn.findFirst({
+        where: { id: data.supplierReturnId, businessId },
+      });
+      if (!sr) {
         return null;
       }
     }
@@ -166,6 +188,9 @@ export class AttachmentsService {
           ...(data.purchaseOrderId
             ? { purchaseOrderId: data.purchaseOrderId }
             : {}),
+          ...(data.supplierReturnId
+            ? { supplierReturnId: data.supplierReturnId }
+            : {}),
         },
         orderBy: { version: 'desc' },
       });
@@ -180,6 +205,7 @@ export class AttachmentsService {
           businessId,
           purchaseId: data.purchaseId,
           purchaseOrderId: data.purchaseOrderId,
+          supplierReturnId: data.supplierReturnId,
           filename: data.filename,
           storageKey: data.storageKey ?? null,
           url: data.url,
@@ -220,6 +246,7 @@ export class AttachmentsService {
       existing.purchaseId ?? undefined,
       existing.purchaseOrderId ?? undefined,
       branchScope,
+      existing.supplierReturnId ?? undefined,
     );
 
     const attachment = await this.prisma.attachment.update({
@@ -244,6 +271,7 @@ export class AttachmentsService {
     purchaseId?: string,
     purchaseOrderId?: string,
     branchScope: string[] = [],
+    supplierReturnId?: string,
   ) {
     if (!branchScope.length) {
       return;
@@ -266,6 +294,15 @@ export class AttachmentsService {
         throw new ForbiddenException('Branch-scoped role restriction.');
       }
     }
+    if (supplierReturnId) {
+      const sr = await this.prisma.supplierReturn.findFirst({
+        where: { id: supplierReturnId, businessId },
+        select: { branchId: true },
+      });
+      if (!sr || !branchScope.includes(sr.branchId)) {
+        throw new ForbiddenException('Branch-scoped role restriction.');
+      }
+    }
   }
 
   private async resolveScopedDocumentIds(
@@ -273,20 +310,22 @@ export class AttachmentsService {
     purchaseId: string | undefined,
     purchaseOrderId: string | undefined,
     branchScope: string[] = [],
+    supplierReturnId?: string,
   ) {
-    if (purchaseId || purchaseOrderId) {
+    if (purchaseId || purchaseOrderId || supplierReturnId) {
       await this.assertBranchScope(
         businessId,
         purchaseId,
         purchaseOrderId,
         branchScope,
+        supplierReturnId,
       );
-      return { purchaseId, purchaseOrderId };
+      return { purchaseId, purchaseOrderId, supplierReturnId };
     }
     if (!branchScope.length) {
       return {};
     }
-    const [purchases, purchaseOrders] = await Promise.all([
+    const [purchases, purchaseOrders, supplierReturns] = await Promise.all([
       this.prisma.purchase.findMany({
         where: { businessId, branchId: { in: branchScope } },
         select: { id: true },
@@ -295,10 +334,85 @@ export class AttachmentsService {
         where: { businessId, branchId: { in: branchScope } },
         select: { id: true },
       }),
+      this.prisma.supplierReturn.findMany({
+        where: { businessId, branchId: { in: branchScope } },
+        select: { id: true },
+      }),
     ]);
     return {
       purchaseIds: purchases.map((row) => row.id),
       purchaseOrderIds: purchaseOrders.map((row) => row.id),
+      supplierReturnIds: supplierReturns.map((row) => row.id),
     };
+  }
+
+  async bulkDownload(businessId: string, attachmentIds: string[]) {
+    if (!attachmentIds.length) {
+      throw new BadRequestException('attachmentIds must not be empty.');
+    }
+    if (attachmentIds.length > 50) {
+      throw new BadRequestException('Maximum 50 attachments per bulk download.');
+    }
+    const attachments = await this.prisma.attachment.findMany({
+      where: { id: { in: attachmentIds }, businessId },
+    });
+    if (!attachments.length) {
+      throw new NotFoundException('No matching attachments found.');
+    }
+
+    const files: { name: string; data: Buffer }[] = [];
+    for (const att of attachments) {
+      if (!att.storageKey) {
+        continue;
+      }
+      const { url } = await this.storageService.createPresignedDownload({
+        key: att.storageKey,
+        allowedPrefix: `attachments/${businessId}/`,
+      });
+      const response = await fetch(url);
+      if (!response.ok) {
+        continue;
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      files.push({ name: att.filename, data: Buffer.from(arrayBuffer) });
+    }
+
+    if (!files.length) {
+      throw new BadRequestException('No downloadable attachments found.');
+    }
+
+    const zipBuffer = createZip(files);
+    const zipKey = `attachments/${businessId}/bulk-${Date.now()}.zip`;
+    const result = await this.storageService.uploadObject({
+      key: zipKey,
+      body: zipBuffer,
+      contentType: 'application/zip',
+    });
+    return { zipUrl: result.publicUrl };
+  }
+
+  async listVersions(businessId: string, attachmentId: string) {
+    const attachment = await this.prisma.attachment.findFirst({
+      where: { id: attachmentId, businessId },
+    });
+    if (!attachment) {
+      return null;
+    }
+    return this.prisma.attachment.findMany({
+      where: {
+        businessId,
+        filename: attachment.filename,
+        ...(attachment.purchaseId
+          ? { purchaseId: attachment.purchaseId }
+          : {}),
+        ...(attachment.purchaseOrderId
+          ? { purchaseOrderId: attachment.purchaseOrderId }
+          : {}),
+        ...(attachment.supplierReturnId
+          ? { supplierReturnId: attachment.supplierReturnId }
+          : {}),
+      },
+      orderBy: { version: 'desc' },
+    });
   }
 }

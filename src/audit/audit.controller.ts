@@ -703,6 +703,34 @@ export class AuditController {
     res.send([header.join(','), ...lines].join('\n'));
   }
 
+  @Get('activity-by-user')
+  @Permissions(PermissionsList.AUDIT_READ)
+  async activityByUser(
+    @Req() req: { user?: { businessId: string } },
+  ) {
+    const businessId = requireBusinessId(req);
+    const data = await this.prisma.auditLog.groupBy({
+      by: ['userId'],
+      where: { businessId, userId: { not: null } },
+      _count: { id: true },
+      orderBy: { _count: { id: 'desc' } },
+      take: 10,
+    });
+    const userIds = data
+      .map((r) => r.userId)
+      .filter((id): id is string => Boolean(id));
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, name: true },
+    });
+    const nameMap = new Map(users.map((u) => [u.id, u.name]));
+    return data.map((r) => ({
+      userId: r.userId,
+      name: nameMap.get(r.userId!) ?? null,
+      actionCount: r._count.id,
+    }));
+  }
+
   @Get(':id')
   @Permissions(PermissionsList.AUDIT_READ)
   getById(
